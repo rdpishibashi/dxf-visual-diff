@@ -29,7 +29,7 @@ def generate_output_filename(file_a_name, file_b_name):
     return f"{file_a_base}_vs_{file_b_base}.dxf"
 
 def app():
-    st.title('DXF図面 差分解析')
+    st.title('DXF Visual Diff Analyzer')
     st.write('複数のDXFファイルペアを比較し、差分をDXFフォーマットで出力します。')
     
     # プログラム説明
