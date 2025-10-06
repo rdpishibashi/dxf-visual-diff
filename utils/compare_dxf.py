@@ -161,13 +161,15 @@ class CoordinateTransformer:
 
 class EntityExpander:
     """INSERTエンティティ展開専用クラス"""
-    
-    def __init__(self, transformer: CoordinateTransformer, debug: bool = False):
+
+    def __init__(self, transformer: CoordinateTransformer, debug: bool = False,
+                 global_offset: Optional[Tuple[float, float]] = None):
         self.transformer = transformer
         self.debug = debug
+        self.global_offset = global_offset  # グローバルオフセット (dx, dy)
         self.excluded_attributes = {
             'handle', 'owner', 'reactors', 'dictionary', 'extension_dict',
-            'objectid', 'uuid', 'app_data', 'doc', 'entitydb', 'is_alive', 
+            'objectid', 'uuid', 'app_data', 'doc', 'entitydb', 'is_alive',
             'is_virtual', 'is_copy', 'soft_pointer_ids', 'hard_pointer_ids'
         }
     
@@ -248,24 +250,36 @@ class EntityExpander:
             logger.warning(f"Error transforming entity {entity.dxftype()}: {e}")
             return None
     
-    def _transform_coordinate_attributes(self, clean_attrs: Dict, transformed_attrs: Dict, 
+    def _apply_global_offset(self, point: Tuple[float, float, float]) -> Tuple[float, float, float]:
+        """グローバルオフセットを適用"""
+        if self.global_offset is None:
+            return point
+
+        dx, dy = self.global_offset
+        return (point[0] + dx, point[1] + dy, point[2] if len(point) > 2 else 0.0)
+
+    def _transform_coordinate_attributes(self, clean_attrs: Dict, transformed_attrs: Dict,
                                        transform_matrix: np.ndarray):
         """座標属性を変換"""
         coordinate_attrs = ['insert', 'center', 'start', 'end', 'location', 'base_point']
-        
+
         for attr_name in coordinate_attrs:
             if attr_name in clean_attrs:
                 original_point = clean_attrs[attr_name]
                 try:
                     if hasattr(original_point, 'x'):
-                        point_tuple = (original_point.x, original_point.y, 
+                        point_tuple = (original_point.x, original_point.y,
                                      getattr(original_point, 'z', 0.0))
                     else:
                         point_tuple = tuple(original_point)
-                    
+
                     transformed_point = self.transformer.transform_point(point_tuple, transform_matrix)
+
+                    # グローバルオフセットを適用
+                    transformed_point = self._apply_global_offset(transformed_point)
+
                     transformed_attrs[attr_name] = transformed_point
-                    
+
                 except Exception:
                     pass
         
@@ -293,13 +307,17 @@ class EntityExpander:
         if 'vertices' in clean_attrs:
             original_vertices = clean_attrs['vertices']
             transformed_vertices = []
-            
+
             for vertex in original_vertices:
                 if len(vertex) >= 2:
                     vertex_3d = (vertex[0], vertex[1], 0.0) if len(vertex) == 2 else vertex
                     transformed_vertex = self.transformer.transform_point(vertex_3d, transform_matrix)
+
+                    # グローバルオフセットを適用
+                    transformed_vertex = self._apply_global_offset(transformed_vertex)
+
                     transformed_vertices.append(transformed_vertex[:2])
-            
+
             transformed_attrs['vertices'] = transformed_vertices
     
     def _transform_size_attributes(self, entity_type: str, clean_attrs: Dict, 
@@ -931,14 +949,15 @@ class OutputGenerator:
             return False
 
 
-def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: str, 
-                                       tolerance: float = 0.01, 
-                                       deleted_color: int = 6, 
-                                       added_color: int = 4, 
-                                       unchanged_color: int = 7) -> bool:
+def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: str,
+                                       tolerance: float = 0.01,
+                                       deleted_color: int = 6,
+                                       added_color: int = 4,
+                                       unchanged_color: int = 7,
+                                       offset_b: Optional[Tuple[float, float]] = None) -> bool:
     """
     DXFファイル比較メイン処理（Streamlit用インターフェース）
-    
+
     Args:
         file_a: 基準DXFファイルパス
         file_b: 比較対象DXFファイルパス
@@ -947,7 +966,8 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         deleted_color: 削除エンティティの色（デフォルト: 6=マゼンタ）
         added_color: 追加エンティティの色（デフォルト: 4=シアン）
         unchanged_color: 変更なしエンティティの色（デフォルト: 7=白/黒）
-        
+        offset_b: ファイルBに適用するオフセット (dx, dy) のタプル (オプション)
+
     Returns:
         bool: 成功した場合True、失敗した場合False
     """
@@ -955,21 +975,22 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         # 設定の初期化
         tolerance_config = ToleranceConfig(tolerance)
         transformer = CoordinateTransformer(tolerance_config, debug=False)
-        expander = EntityExpander(transformer, debug=False)
+        expander_a = EntityExpander(transformer, debug=False, global_offset=None)
+        expander_b = EntityExpander(transformer, debug=False, global_offset=offset_b)
         signature_generator = SignatureGenerator(transformer, debug=False)
         diff_analyzer = DiffAnalyzer(signature_generator, debug=False)
         layer_config = LayerConfig(deleted_color, added_color, unchanged_color)
         output_generator = OutputGenerator(transformer, layer_config, debug=False)
-        
+
         # DXFファイル読み込み
         doc_a = ezdxf.readfile(file_a)
         doc_b = ezdxf.readfile(file_b)
-        
-        # エンティティ抽出
+
+        # エンティティ抽出（ファイルBにはオフセット適用済み）
         entities_a, data_a, locations_a = diff_analyzer.extract_entities_from_doc(
-            doc_a, "A", expander)
+            doc_a, "A", expander_a)
         entities_b, data_b, locations_b = diff_analyzer.extract_entities_from_doc(
-            doc_b, "B", expander)
+            doc_b, "B", expander_b)
         
         # 差分計算
         hashes_a = set(entities_a.keys())
