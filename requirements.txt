@@ -1,3 +1,6 @@
 streamlit>=1.30.0
 ezdxf>=1.4.2
 numpy>=1.24.0
+pandas>=2.0.0
+xlsxwriter>=3.0.0
+openpyxl>=3.1.0

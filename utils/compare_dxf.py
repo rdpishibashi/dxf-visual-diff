@@ -10,6 +10,7 @@ import logging
 import numpy as np
 import tempfile
 import os
+import gc
 
 # 高精度計算設定
 getcontext().prec = 50
@@ -954,7 +955,7 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
                                        deleted_color: int = 6,
                                        added_color: int = 4,
                                        unchanged_color: int = 7,
-                                       offset_b: Optional[Tuple[float, float]] = None) -> bool:
+                                       offset_b: Optional[Tuple[float, float]] = None) -> Tuple[bool, Optional[Dict[str, int]]]:
     """
     DXFファイル比較メイン処理（Streamlit用インターフェース）
 
@@ -969,7 +970,13 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         offset_b: ファイルBに適用するオフセット (dx, dy) のタプル (オプション)
 
     Returns:
-        bool: 成功した場合True、失敗した場合False
+        Tuple[bool, Optional[Dict[str, int]]]: (成功フラグ, エンティティ数情報)
+            エンティティ数情報は以下のキーを含む辞書:
+                - deleted_entities: 削除されたエンティティ数
+                - added_entities: 追加されたエンティティ数
+                - unchanged_entities: 変更なしエンティティ数
+                - diff_entities: 差分エンティティ数（削除+追加）
+                - total_entities: 総エンティティ数
     """
     try:
         # 設定の初期化
@@ -995,17 +1002,49 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         # 差分計算
         hashes_a = set(entities_a.keys())
         hashes_b = set(entities_b.keys())
-        
+
         deleted_hashes = hashes_a - hashes_b
         added_hashes = hashes_b - hashes_a
         common_hashes = hashes_a & hashes_b
-        
+
+        # エンティティ数を計算
+        deleted_count = len(deleted_hashes)
+        added_count = len(added_hashes)
+        unchanged_count = len(common_hashes)
+        diff_count = deleted_count + added_count
+        total_count = deleted_count + added_count + unchanged_count
+
+        entity_counts = {
+            'deleted_entities': deleted_count,
+            'added_entities': added_count,
+            'unchanged_entities': unchanged_count,
+            'diff_entities': diff_count,
+            'total_entities': total_count
+        }
+
         # 差分DXFファイル生成
         success = output_generator.create_diff_dxf(
             entities_a, entities_b, deleted_hashes, added_hashes, common_hashes, output_file)
-        
-        return success
-        
+
+        # メモリ解放: 大きなデータ構造を削除
+        del doc_a
+        del doc_b
+        del entities_a
+        del entities_b
+        del data_a
+        del data_b
+        del locations_a
+        del locations_b
+        del deleted_hashes
+        del added_hashes
+        del common_hashes
+        # ガベージコレクションを実行
+        gc.collect()
+
+        return success, entity_counts if success else None
+
     except Exception as e:
         logger.error(f"DXF comparison error: {e}")
-        return False
+        # エラー時もメモリ解放
+        gc.collect()
+        return False, None

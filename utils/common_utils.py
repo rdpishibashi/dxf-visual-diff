@@ -1,6 +1,7 @@
 import os
 import tempfile
 import traceback
+import re
 
 def save_uploadedfile(uploadedfile):
     """アップロードされたファイルを一時ディレクトリに保存する"""

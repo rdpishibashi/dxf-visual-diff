@@ -13,12 +13,37 @@ sys.path.insert(0, utils_path)
 
 from utils.compare_dxf import compare_dxf_files_and_generate_dxf
 from utils.common_utils import save_uploadedfile, handle_error
+from utils.label_diff import (
+    compute_label_differences,
+    filter_unchanged_by_prefix,
+    build_diff_labels_workbook,
+    build_unchanged_labels_workbook
+)
 
 st.set_page_config(
     page_title="DXF Visual Diff",
     page_icon="📊",
     layout="wide",
 )
+
+def load_prefix_config(config_file='prefix_config.txt'):
+    """
+    prefix_config.txt からプレフィックスリストを読み込む
+    """
+    prefixes = []
+    config_path = os.path.join(current_dir, config_file)
+
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        prefixes.append(line)
+        except Exception as e:
+            st.warning(f"プレフィックス設定ファイルの読み込みに失敗しました: {e}")
+
+    return prefixes
 
 def generate_output_filename(file_a_name, file_b_name):
     """
@@ -30,17 +55,24 @@ def generate_output_filename(file_a_name, file_b_name):
 
     return f"{file_a_base}_vs_{file_b_base}.dxf"
 
-def create_zip_archive(results):
+def create_zip_archive(results, diff_labels_data=None, unchanged_labels_data=None):
     """
-    複数のDXFファイルをZIPアーカイブに圧縮
+    複数のDXFファイルとExcelファイルをZIPアーカイブに圧縮
     """
     zip_buffer = BytesIO()
 
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        for pair_name, file_a_name, file_b_name, output_filename, dxf_data, success in results:
+        for pair_name, file_a_name, file_b_name, output_filename, dxf_data, success, _ in results:
             if success and dxf_data:
                 # ZIPファイル内のファイル名を設定
                 zip_file.writestr(output_filename, dxf_data)
+
+        # Excelファイルを追加
+        if diff_labels_data:
+            zip_file.writestr('diff_labels.xlsx', diff_labels_data)
+
+        if unchanged_labels_data:
+            zip_file.writestr('unchanged_labels.xlsx', unchanged_labels_data)
 
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
@@ -170,6 +202,26 @@ def app():
                 format_func=lambda x: x[1]
             )[0]
 
+        st.write("---")
+        st.write("**ラベル比較設定**")
+
+        # プレフィックス設定の読み込み
+        default_prefixes = load_prefix_config()
+        default_prefix_text = "\n".join(default_prefixes) if default_prefixes else "W No."
+
+        prefix_text = st.text_area(
+            "未変更ラベルのフィルタリング用プレフィックス",
+            value=default_prefix_text,
+            height=100,
+            help="unchanged_labels.xlsx に含めるラベルのプレフィックスを1行ごとに指定します。\n例: W No., R, C など"
+        )
+
+        # プレフィックスをセッション状態に保存
+        if prefix_text:
+            st.session_state.custom_prefixes = [p.strip() for p in prefix_text.split('\n') if p.strip()]
+        else:
+            st.session_state.custom_prefixes = []
+
     # オフセット補正設定
     with st.expander("オフセット補正設定（オプション）", expanded=False):
         st.info("""
@@ -240,6 +292,13 @@ def app():
                     results = []
                     temp_files_to_cleanup = []
 
+                    # ラベル比較結果を格納するリスト
+                    diff_sheets = []
+                    unchanged_sheets = []
+
+                    # プレフィックス設定を取得（カスタム設定またはデフォルト）
+                    prefixes = st.session_state.get('custom_prefixes', load_prefix_config())
+
                     for idx, (file_a, file_b, pair_name, output_filename) in enumerate(file_pairs_valid):
                         # 一時ファイルに保存
                         temp_file_a = save_uploadedfile(file_a)
@@ -252,7 +311,7 @@ def app():
                         offset_b = st.session_state.offset_pairs.get(idx, None)
 
                         # DXF比較処理
-                        result = compare_dxf_files_and_generate_dxf(
+                        success, entity_counts = compare_dxf_files_and_generate_dxf(
                             temp_file_a,
                             temp_file_b,
                             temp_output,
@@ -262,20 +321,52 @@ def app():
                             unchanged_color=unchanged_color,
                             offset_b=offset_b
                         )
-                        
-                        if result:
+
+                        if success:
                             # 結果ファイルを読み込み
                             with open(temp_output, 'rb') as f:
                                 dxf_data = f.read()
-                            
+
                             results.append((
                                 pair_name,
                                 file_a.name,
                                 file_b.name,
                                 output_filename,
                                 dxf_data,
-                                True
+                                True,
+                                entity_counts
                             ))
+
+                            # ラベル比較処理を追加
+                            try:
+                                # ラベルの差分を計算
+                                change_rows, unchanged_entries = compute_label_differences(
+                                    temp_file_b,  # 新ファイル
+                                    temp_file_a,  # 旧ファイル
+                                    tolerance=tolerance
+                                )
+
+                                # シート名を生成（ファイル名から拡張子を除いたもの）
+                                sheet_name = Path(file_b.name).stem
+
+                                # diff_labels用のシートデータ
+                                diff_sheets.append({
+                                    'sheet_name': sheet_name,
+                                    'rows': change_rows,
+                                    'old_label_name': f'Old: {Path(file_a.name).stem}',
+                                    'new_label_name': f'New: {Path(file_b.name).stem}'
+                                })
+
+                                # unchanged_labels用のデータをフィルタリング
+                                if prefixes:
+                                    filtered_unchanged = filter_unchanged_by_prefix(unchanged_entries, prefixes)
+                                    if filtered_unchanged:
+                                        unchanged_sheets.append({
+                                            'sheet_name': sheet_name,
+                                            'rows': filtered_unchanged
+                                        })
+                            except Exception as e:
+                                st.warning(f"{pair_name} のラベル比較処理中にエラーが発生しました: {e}")
                         else:
                             results.append((
                                 pair_name,
@@ -283,11 +374,30 @@ def app():
                                 file_b.name,
                                 output_filename,
                                 None,
-                                False
+                                False,
+                                None
                             ))
-                    
+
+                    # Excelワークブックを生成
+                    diff_labels_data = None
+                    unchanged_labels_data = None
+
+                    if diff_sheets:
+                        try:
+                            diff_labels_data = build_diff_labels_workbook(diff_sheets)
+                        except Exception as e:
+                            st.warning(f"diff_labels.xlsx の生成中にエラーが発生しました: {e}")
+
+                    if unchanged_sheets:
+                        try:
+                            unchanged_labels_data = build_unchanged_labels_workbook(unchanged_sheets)
+                        except Exception as e:
+                            st.warning(f"unchanged_labels.xlsx の生成中にエラーが発生しました: {e}")
+
                     # 結果をセッション状態に保存
                     st.session_state.processing_results = results
+                    st.session_state.diff_labels_data = diff_labels_data
+                    st.session_state.unchanged_labels_data = unchanged_labels_data
                     st.session_state.processing_settings = {
                         'added_color': added_color,
                         'deleted_color': deleted_color,
@@ -308,6 +418,8 @@ def app():
         if 'processing_results' in st.session_state and st.session_state.processing_results:
             results = st.session_state.processing_results
             settings = st.session_state.get('processing_settings', {})
+            diff_labels_data = st.session_state.get('diff_labels_data', None)
+            unchanged_labels_data = st.session_state.get('unchanged_labels_data', None)
             
             # 結果サマリーの表示
             successful_pairs = sum(1 for r in results if r[5])
@@ -338,7 +450,7 @@ def app():
 
             # ZIPダウンロードボタン（複数ファイルが成功した場合のみ表示）
             if download_method == "ZIPアーカイブとしてダウンロード" and len(successful_results) > 1:
-                zip_data = create_zip_archive(results)
+                zip_data = create_zip_archive(results, diff_labels_data, unchanged_labels_data)
                 st.download_button(
                     label="📦 全ての結果をZIPでダウンロード",
                     data=zip_data,
@@ -350,13 +462,21 @@ def app():
                 st.write("---")
 
             # 個別ダウンロードボタンまたはリスト表示
-            for pair_name, file_a_name, file_b_name, output_filename, dxf_data, success in results:
+            for pair_name, file_a_name, file_b_name, output_filename, dxf_data, success, entity_counts in results:
                 if success and dxf_data:
                     if download_method == "個別にダウンロード":
                         col1, col2 = st.columns([3, 1])
 
                         with col1:
                             st.write(f"**{pair_name}**: {file_a_name} ↔ {file_b_name}")
+                            # エンティティ数の表示
+                            if entity_counts:
+                                st.caption(
+                                    f"📊 削除: {entity_counts['deleted_entities']}, "
+                                    f"追加: {entity_counts['added_entities']}, "
+                                    f"変更なし: {entity_counts['unchanged_entities']}, "
+                                    f"合計: {entity_counts['total_entities']}"
+                                )
 
                         with col2:
                             st.download_button(
@@ -368,15 +488,47 @@ def app():
                             )
                     else:
                         # ZIPダウンロード時はファイルリストのみ表示
-                        st.write(f"✅ **{pair_name}**: {file_a_name} ↔ {file_b_name} → `{output_filename}`")
+                        entity_info = ""
+                        if entity_counts:
+                            entity_info = f" (差分: {entity_counts['diff_entities']}件)"
+                        st.write(f"✅ **{pair_name}**: {file_a_name} ↔ {file_b_name} → `{output_filename}`{entity_info}")
                 elif not success:
                     st.error(f"❌ **{pair_name}**: {file_a_name} ↔ {file_b_name} - 処理に失敗しました")
-            
+
+            # Excelファイルのダウンロードボタンを追加
+            if diff_labels_data or unchanged_labels_data:
+                st.write("---")
+                st.subheader("📊 ラベル比較結果 (Excel)")
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    if diff_labels_data:
+                        st.download_button(
+                            label="📄 diff_labels.xlsx をダウンロード",
+                            data=diff_labels_data,
+                            file_name="diff_labels.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="download_diff_labels"
+                        )
+                        st.caption("各ペアのラベル差分を含むExcelファイル")
+
+                with col2:
+                    if unchanged_labels_data:
+                        st.download_button(
+                            label="📄 unchanged_labels.xlsx をダウンロード",
+                            data=unchanged_labels_data,
+                            file_name="unchanged_labels.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="download_unchanged_labels"
+                        )
+                        st.caption("各ペアの未変更ラベルを含むExcelファイル")
+
             # 新しい比較を開始するボタン
             if st.button("🔄 新しい比較を開始", key="restart_button"):
                 # セッション状態をクリアして新しい比較を開始
                 for key in list(st.session_state.keys()):
-                    if key == 'processing_results' or key == 'processing_settings':
+                    if key in ['processing_results', 'processing_settings', 'diff_labels_data', 'unchanged_labels_data']:
                         del st.session_state[key]
                 st.rerun()
             
