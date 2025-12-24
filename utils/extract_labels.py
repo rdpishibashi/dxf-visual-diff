@@ -5,16 +5,26 @@ import sys
 import gc
 from typing import List, Tuple, Dict, Optional
 
-# 抽出設定（DXF-diff-managerのExtractionConfigから移植）
-class ExtractionConfig:
-    """DXF抽出関連の設定"""
-    DRAWING_NUMBER_PATTERN = r'[A-Z]{2}\d{4}-\d{3}-\d{2}[A-Z]'  # 図番パターン
-    SOURCE_LABEL_PROXIMITY = 80     # 流用元図番ラベルからの検出距離
-    DWG_NO_LABEL_PROXIMITY = 80     # DWG No.ラベルからの検出距離
-    TITLE_PROXIMITY_X = 80          # TITLEラベルからの横方向検出距離
-    RIGHTMOST_DRAWING_TOLERANCE = 100.0  # 右端図面判定の許容範囲
+# 抽出設定の読み込み（環境適応型）
+# DXF-diff-manager: 外部config.pyから読み込み
+# DXF-visual-diff: 内部定義にフォールバック
+try:
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir)
+    sys.path.insert(0, parent_dir)
+    from config import extraction_config
+except ImportError:
+    # config.pyが存在しない場合は内部定義を使用
+    class ExtractionConfig:
+        """DXF抽出関連の設定"""
+        # 両フォーマット対応: XX0000-000-00X（長）、XX0000-000X（短）
+        DRAWING_NUMBER_PATTERN = r'[A-Z]{2}\d{4}-\d{3}(?:-\d{2})?[A-Z]'  # 図番パターン
+        SOURCE_LABEL_PROXIMITY = 80     # 流用元図番ラベルからの検出距離
+        DWG_NO_LABEL_PROXIMITY = 80     # DWG No.ラベルからの検出距離
+        TITLE_PROXIMITY_X = 80          # TITLEラベルからの横方向検出距離
+        RIGHTMOST_DRAWING_TOLERANCE = 100.0  # 右端図面判定の許容範囲
 
-extraction_config = ExtractionConfig()
+    extraction_config = ExtractionConfig()
 
 def get_layers_from_dxf(dxf_file):
     """
