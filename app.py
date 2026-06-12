@@ -340,7 +340,7 @@ def app():
                             # ラベル比較処理を追加
                             try:
                                 # ラベルの差分を計算
-                                change_rows, unchanged_entries = compute_label_differences(
+                                change_rows, unchanged_entries, _extra_info = compute_label_differences(
                                     temp_file_b,  # 新ファイル
                                     temp_file_a,  # 旧ファイル
                                     tolerance=tolerance

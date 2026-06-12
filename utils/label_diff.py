@@ -7,11 +7,36 @@ diff_labels.xlsx / unchanged_labels.xlsx をアプリ内で生成する。
 
 import io
 from collections import Counter
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 import pandas as pd
 
 from .extract_labels import extract_labels
+
+
+def _load_labels_with_cache(
+    file_path: str,
+    label_cache: Optional[dict],
+    filter_non_parts: bool = False,
+    validate_ref_designators: bool = False,
+):
+    """キャッシュを利用してラベルを読み込む。(labels, info) を返す。"""
+    cache_key = (file_path, True, filter_non_parts, validate_ref_designators)
+    if label_cache is not None and cache_key in label_cache:
+        return label_cache[cache_key]
+
+    labels, info = extract_labels(
+        file_path,
+        filter_non_parts=filter_non_parts,
+        sort_order="none",
+        include_coordinates=True,
+        validate_ref_designators=validate_ref_designators,
+        extract_title_option=True,
+    )
+    result = (labels, info)
+    if label_cache is not None:
+        label_cache[cache_key] = result
+    return result
 
 
 def round_coordinate(value: float, tolerance: float) -> float:
@@ -40,28 +65,26 @@ def group_labels_by_coordinate(rounded_labels: List[Tuple[str, float, float]]):
     return groups
 
 
-def compute_label_differences(new_file: str, old_file: str, tolerance: float = 0.01):
+def compute_label_differences(
+    new_file: str,
+    old_file: str,
+    tolerance: float = 0.01,
+    label_cache: Optional[dict] = None,
+    filter_non_parts: bool = False,
+    validate_ref_designators: bool = False,
+):
     """
     ラベルを抽出（ブロック展開を含む）し、変更候補・未変更候補を計算する。
 
     Returns
     -------
-    tuple(list, list)
+    tuple(list, list, dict)
         change_rows: 変更候補（座標と旧/新ラベルを含む辞書のリスト）
         unchanged_entries: 同一座標で一致したラベル情報のリスト
+        extra_info: {'labels_new': [...], 'invalid_ref_designators': [...]}
     """
-    labels_new, _ = extract_labels(
-        new_file,
-        filter_non_parts=False,
-        sort_order="none",
-        include_coordinates=True
-    )
-    labels_old, _ = extract_labels(
-        old_file,
-        filter_non_parts=False,
-        sort_order="none",
-        include_coordinates=True
-    )
+    labels_new, info_new = _load_labels_with_cache(new_file, label_cache, filter_non_parts, validate_ref_designators)
+    labels_old, _ = _load_labels_with_cache(old_file, label_cache, filter_non_parts, False)
 
     rounded_new = round_labels_with_coordinates(labels_new, tolerance)
     rounded_old = round_labels_with_coordinates(labels_old, tolerance)
@@ -71,7 +94,14 @@ def compute_label_differences(new_file: str, old_file: str, tolerance: float = 0
 
     change_rows, unchanged_entries = find_label_change_pairs(grouped_new, grouped_old)
     change_rows.sort(key=lambda r: ((r['Old Label'] or ''), (r['New Label'] or '')))
-    return change_rows, unchanged_entries
+
+    extra_info = {
+        'labels_new': labels_new,
+        'invalid_ref_designators': info_new.get('invalid_ref_designators', []),
+        'title': info_new.get('title'),
+        'subtitle': info_new.get('subtitle'),
+    }
+    return change_rows, unchanged_entries, extra_info
 
 
 def find_label_change_pairs(group_new, group_old):
@@ -157,18 +187,71 @@ def filter_unchanged_by_prefix(unchanged_entries, prefixes: List[str]):
     return rows
 
 
-def build_diff_labels_workbook(sheets: List[Dict]) -> bytes:
-    """diff_labels.xlsx のバイナリデータを生成する。"""
+def build_diff_labels_workbook(
+    sheets: List[Dict],
+    summary_data: Optional[List[Dict]] = None,
+    total_data: Optional[List[Dict]] = None,
+    invalid_data: Optional[List[Dict]] = None,
+) -> bytes:
+    """diff_labels.xlsx のバイナリデータを生成する。
+
+    シート順: Summary → Total（任意）→ ペアシート × N → Invalid（任意）
+    """
+    # ペアシート名を事前決定（Summary の図番ハイパーリンクに必要）
+    tmp_used: set = set()
+    if summary_data is not None:
+        tmp_used.add('Summary')
+    if total_data is not None:
+        tmp_used.add('Total')
+    pair_sheet_names = [
+        ensure_unique_sheet_name(s.get('sheet_name') or 'Sheet', tmp_used)
+        for s in sheets
+    ]
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        if not sheets:
+        workbook = writer.book
+
+        if not sheets and summary_data is None and total_data is None and invalid_data is None:
             empty_df = pd.DataFrame(columns=['Coordinate X', 'Coordinate Y', 'Old Label', 'New Label'])
             empty_df.to_excel(writer, sheet_name='NoData', index=False)
             format_sheet(writer, 'NoData', empty_df)
         else:
-            used_names = set()
-            for sheet in sheets:
-                sheet_name = ensure_unique_sheet_name(sheet.get('sheet_name') or "Sheet", used_names)
+            # ── Summary シート ──
+            if summary_data is not None:
+                header_fmt = workbook.add_format({
+                    'bold': True, 'bg_color': '#4472C4', 'font_color': 'white', 'border': 1
+                })
+                link_fmt = workbook.add_format({'font_color': 'blue', 'underline': True})
+                num_fmt = workbook.add_format({'num_format': '#,##0'})
+
+                ws = workbook.add_worksheet('Summary')
+                ws.freeze_panes(1, 0)
+                headers = ['図番', '流用元図番', '追加ラベル数', '削除ラベル数', '変更ラベル数', 'タイトル', 'サブタイトル']
+                col_widths = [22, 22, 14, 14, 14, 30, 30]
+                for col_idx, (h, w) in enumerate(zip(headers, col_widths)):
+                    ws.write(0, col_idx, h, header_fmt)
+                    ws.set_column(col_idx, col_idx, w)
+
+                for row_idx, (row, sheet_name) in enumerate(zip(summary_data, pair_sheet_names), start=1):
+                    main_drawing = row.get('図番', '')
+                    url = f"internal:'{sheet_name}'!A1"
+                    ws.write_url(row_idx, 0, url, link_fmt, main_drawing)
+                    ws.write(row_idx, 1, row.get('流用元図番') or '')
+                    ws.write(row_idx, 2, row.get('追加ラベル数', 0), num_fmt)
+                    ws.write(row_idx, 3, row.get('削除ラベル数', 0), num_fmt)
+                    ws.write(row_idx, 4, row.get('変更ラベル数', 0), num_fmt)
+                    ws.write(row_idx, 5, row.get('タイトル') or '')
+                    ws.write(row_idx, 6, row.get('サブタイトル') or '')
+
+            # ── Total シート ──
+            if total_data is not None:
+                total_df = pd.DataFrame(total_data, columns=['ラベル', '個数'])
+                total_df.to_excel(writer, sheet_name='Total', index=False)
+                format_sheet(writer, 'Total', total_df)
+
+            # ── ペアシート ──
+            for sheet, sheet_name in zip(sheets, pair_sheet_names):
                 rows = sheet.get('rows') or []
                 df = pd.DataFrame(rows, columns=['Coordinate X', 'Coordinate Y', 'Old Label', 'New Label'])
                 old_col = sheet.get('old_label_name', 'Old Label')
@@ -176,6 +259,13 @@ def build_diff_labels_workbook(sheets: List[Dict]) -> bytes:
                 df.rename(columns={'Old Label': old_col, 'New Label': new_col}, inplace=True)
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
                 format_sheet(writer, sheet_name, df)
+
+            # ── Invalid シート ──
+            if invalid_data is not None:
+                invalid_df = pd.DataFrame(invalid_data, columns=['機器符号', '個数', 'ファイル名'])
+                invalid_df.to_excel(writer, sheet_name='Invalid', index=False)
+                format_sheet(writer, 'Invalid', invalid_df)
+
     output.seek(0)
     return output.getvalue()
 
@@ -221,7 +311,11 @@ def format_sheet(writer, sheet_name: str, df: pd.DataFrame):
             if column in ('Coordinate X', 'Coordinate Y'):
                 width = 14
             elif column in ('Old Label', 'New Label', 'Label'):
-                width = 30
+                width = 100
+            elif column in ('ラベル', '機器符号'):
+                width = 20
+            elif column == 'ファイル名':
+                width = 40
             else:
                 width = 12
             worksheet.set_column(col_idx, col_idx, width)
