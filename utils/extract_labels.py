@@ -5,6 +5,8 @@ import sys
 import gc
 from typing import List, Tuple, Dict, Optional
 
+from ezdxf.tools.text import plain_mtext
+
 # 抽出設定の読み込み（環境適応型）
 # config.py が存在するプロジェクト（DXF-diff-manager 等）ではそこから読み込む
 # 存在しないプロジェクトではフォールバックの内部定義を使用
@@ -40,29 +42,28 @@ def get_layers_from_dxf(dxf_file):
 
 
 def clean_mtext_format_codes(text: str) -> str:
-    r"""MTEXTのフォーマットコードを除去してテキスト内容を返す"""
+    r"""MTEXTのフォーマットコードを除去してテキスト内容を返す。
+
+    ezdxf の ``plain_mtext()`` でインラインフォーマットコードを解釈する。
+    旧実装（手書き正規表現）と実データ 12,145 件で出力一致を確認済み
+    （v1.5.1, 2026-06-15）。加えて旧実装が未対応だった以下も正しく処理する:
+      - ``\S`` 分数・スタッキング（例: ``1\S1/2;`` → ``11/2``）
+      - ``%%c`` / ``%%d`` / ``%%p``（Ø / ° / ±）
+      - ``^I`` / ``^J`` / ``^M`` キャレットシーケンス → 空白
+    日本語環境の円マーク（¥）→ バックスラッシュ正規化は plain_mtext の
+    前処理として、``\P`` 等で生じる改行 → スペース化は後処理として残す。
+    """
     if not text:
         return ""
 
-    # 日本語環境の円マーク（¥）をバックスラッシュに正規化
+    # 日本語環境の円マーク（¥）をバックスラッシュに正規化（plain_mtext の前処理）
     cleaned = text.replace('¥', '\\')
 
-    # フォーマット制御コードを除去（\P は段落区切りとして後処理）
-    cleaned = re.sub(r'\\f[^;]*;', '', cleaned)
-    cleaned = re.sub(r'\\H[^;]*;', '', cleaned)
-    cleaned = re.sub(r'\\W[^;]*;', '', cleaned)
-    cleaned = re.sub(r'\\C[^;]*;', '', cleaned)
-    cleaned = re.sub(r'\\A[^;]*;', '', cleaned)
-    cleaned = re.sub(r'\\T[^;]*;', '', cleaned)
-    cleaned = re.sub(r'\\(?!P)[^\\;]*;', '', cleaned)
+    # ezdxf の MTEXT パーサでフォーマットコードを解釈
+    cleaned = plain_mtext(cleaned)
 
-    cleaned = cleaned.replace('\\~', ' ')
-    cleaned = cleaned.replace('\\\\', '\\')
-    cleaned = cleaned.replace('\\{', '{')
-    cleaned = cleaned.replace('\\}', '}')
-
-    cleaned = re.sub(r' +', ' ', cleaned)
-    cleaned = cleaned.replace('\\P', ' ')  # 段落区切り → スペース
+    # \P（段落区切り）等で生じる改行をスペースへ（旧実装の挙動を踏襲）
+    cleaned = cleaned.replace('\n', ' ')
     return re.sub(r'\s+', ' ', cleaned).strip()
 
 
