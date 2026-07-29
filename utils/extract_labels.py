@@ -3,6 +3,7 @@ import re
 import os
 import sys
 import gc
+import warnings
 from typing import List, Tuple, Dict, Optional
 
 from ezdxf.tools.text import plain_mtext
@@ -685,6 +686,21 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
             main_drawing_group = drawing_info['main_group']
 
         # タイトル・サブタイトルの抽出
+        # extract_title_option=True かつ extract_drawing_numbers_option=False の
+        # 組み合わせは、main_drawing_group が計算されないため同一タイトルブロック
+        # グループ制限（2026-07-12修正）が働かず、複数タイトルブロックが1ファイルに
+        # 存在する図面でタイトル/サブタイトルを誤抽出しやすい（2026-07-29、
+        # DXF-diff-manager の呼び出し漏れで実際に発生）。呼び出し側の渡し忘れに
+        # 気付けるよう警告する（挙動は変えない）。
+        if extract_title_option and not extract_drawing_numbers_option:
+            warnings.warn(
+                "extract_labels(): extract_title_option=True だが "
+                "extract_drawing_numbers_option=False のため、複数タイトルブロックが"
+                "1ファイルに存在する図面でタイトル/サブタイトルを誤抽出する可能性があります。"
+                "通常は両方を True にして呼び出してください。",
+                stacklevel=2,
+            )
+
         if extract_title_option and all_labels_with_coords:
             title_info = extract_title_and_subtitle(
                 all_labels_with_coords,
