@@ -3,7 +3,6 @@ import re
 import os
 import sys
 import gc
-import warnings
 from typing import List, Tuple, Dict, Optional
 
 from ezdxf.tools.text import plain_mtext
@@ -662,7 +661,12 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
                     if extract_drawing_numbers_option or extract_title_option:
                         all_labels_with_coords.append((clean_text, coordinates, group_key))
 
-                    if extract_drawing_numbers_option:
+                    # タイトル抽出（extract_title_option）も、同一タイトルブロック
+                    # グループ制限（main_drawing_group、下記参照）のために図番候補を
+                    # 内部的に必要とするため、extract_drawing_numbers_option の指定に
+                    # 関わらず収集する（2026-07-29、呼び出し側の渡し忘れに強くする
+                    # ための内部結合解消。詳細は下記コメント）。
+                    if extract_drawing_numbers_option or extract_title_option:
                         for dn in extract_drawing_numbers(clean_text):
                             drawing_number_candidates.append((dn, coordinates, group_key))
 
@@ -672,39 +676,35 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
         info["total_extracted"] = len(labels)
 
         # 図面番号の判別
+        # main_drawing_group は extract_title_and_subtitle() の同一タイトルブロック
+        # グループ制限に使うため、extract_title_option=True であれば
+        # extract_drawing_numbers_option の指定に関わらず常に計算する（2026-07-29）。
+        # 以前は extract_drawing_numbers_option=True を渡し忘れると main_drawing_group
+        # が計算されずこの制限が働かず、複数タイトルブロックが1ファイルに存在する
+        # 図面（同一図番のシートが横並びで対象シートだけタイトル行が欠落している等）
+        # でタイトル/サブタイトルを誤抽出していた（DXF-diff-manager の呼び出し漏れで
+        # 実際に発生）。呼び出し側のオプション指定を尊重するため、info の公開キー
+        # （main_drawing_number/source_drawing_number/all_drawing_numbers）は
+        # 従来どおり extract_drawing_numbers_option=True のときのみ設定する。
         main_drawing_group = None
-        if extract_drawing_numbers_option and drawing_number_candidates:
+        if (extract_drawing_numbers_option or extract_title_option) and drawing_number_candidates:
             filename_for_matching = original_filename if original_filename else dxf_file
             drawing_info = determine_drawing_number_types(
                 drawing_number_candidates,
                 all_labels=all_labels_with_coords,
                 filename=filename_for_matching,
             )
-            info["main_drawing_number"] = drawing_info['main_drawing']
-            info["source_drawing_number"] = drawing_info['source_drawing']
-            info["all_drawing_numbers"] = [dn[0] for dn in drawing_number_candidates]
             main_drawing_group = drawing_info['main_group']
+            if extract_drawing_numbers_option:
+                info["main_drawing_number"] = drawing_info['main_drawing']
+                info["source_drawing_number"] = drawing_info['source_drawing']
+                info["all_drawing_numbers"] = [dn[0] for dn in drawing_number_candidates]
 
         # タイトル・サブタイトルの抽出
-        # extract_title_option=True かつ extract_drawing_numbers_option=False の
-        # 組み合わせは、main_drawing_group が計算されないため同一タイトルブロック
-        # グループ制限（2026-07-12修正）が働かず、複数タイトルブロックが1ファイルに
-        # 存在する図面でタイトル/サブタイトルを誤抽出しやすい（2026-07-29、
-        # DXF-diff-manager の呼び出し漏れで実際に発生）。呼び出し側の渡し忘れに
-        # 気付けるよう警告する（挙動は変えない）。
-        if extract_title_option and not extract_drawing_numbers_option:
-            warnings.warn(
-                "extract_labels(): extract_title_option=True だが "
-                "extract_drawing_numbers_option=False のため、複数タイトルブロックが"
-                "1ファイルに存在する図面でタイトル/サブタイトルを誤抽出する可能性があります。"
-                "通常は両方を True にして呼び出してください。",
-                stacklevel=2,
-            )
-
         if extract_title_option and all_labels_with_coords:
             title_info = extract_title_and_subtitle(
                 all_labels_with_coords,
-                drawing_numbers=drawing_number_candidates if extract_drawing_numbers_option else None,
+                drawing_numbers=drawing_number_candidates or None,
                 main_drawing_group=main_drawing_group,
                 doc=doc,
             )
