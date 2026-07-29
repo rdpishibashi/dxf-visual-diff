@@ -754,6 +754,30 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
         return [], info
 
 
+def get_title_and_subtitle(dxf_file, original_filename=None):
+    """DXFファイルのタイトル・サブタイトルのみを取得する軽量ラッパー。
+
+    タイトル・サブタイトルだけが必要な呼び出し元（ラベル一覧やフィルタ結果は
+    不要な場合）のための入り口。内部では `extract_labels()` を
+    `extract_drawing_numbers_option=True` と `extract_title_option=True` の
+    組み合わせで呼び出す。v1.9.22の内部結合解消により `extract_title_option=True`
+    単独でも正しく動作するようになっているが、呼び出し元がオプションの組み合わせを
+    都度考えずに済むよう、この関数を経由することを推奨する（2026-07-29追加。
+    呼び出し側のオプション指定ミスで実際に不具合が発生した経緯は
+    determine_drawing_number_types / extract_title_and_subtitle のdocstring参照）。
+
+    Returns:
+        (title, subtitle) のタプル。いずれも str または None。
+    """
+    _, info = extract_labels(
+        dxf_file,
+        extract_drawing_numbers_option=True,
+        extract_title_option=True,
+        original_filename=original_filename,
+    )
+    return info.get('title'), info.get('subtitle')
+
+
 def process_multiple_dxf_files(dxf_files, filter_non_parts=False, sort_order="asc", debug=False,
                                 selected_layers=None, validate_ref_designators=False,
                                 extract_drawing_numbers_option=False, extract_title_option=False,
