@@ -193,3 +193,8 @@ log*.txt
 *.pdf
 *.png
 *.gif
+
+# Technical documentation (development-only info, not tracked in public repos)
+/TECHNICAL.md
+/CLAUDE.md
+/docs/
