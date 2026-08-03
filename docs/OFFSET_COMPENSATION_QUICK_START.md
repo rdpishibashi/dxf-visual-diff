@@ -158,4 +158,4 @@ python analyze_offset.py --help
 
 ## 次のステップ
 
-詳細なドキュメント: `README_offset_analysis.md`を参照してください。
+詳細なドキュメント: `OFFSET_ANALYSIS_TOOL.md`を参照してください。
