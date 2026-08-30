@@ -186,7 +186,7 @@ cython_debug/
 
 # Others
 log*.txt
-.webloc
+*.webloc
 *.xlsx
 *.dxf
 *.svg
