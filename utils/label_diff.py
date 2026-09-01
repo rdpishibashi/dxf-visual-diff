@@ -2,11 +2,12 @@
 DXF Diff Manager で使用するラベル比較ユーティリティ。
 
 独立した DXF-label-diff プロジェクトと同じロジックを組み込み、
-diff_labels.xlsx / unchanged_labels.xlsx をアプリ内で生成する。
+diff_labels.xlsx をアプリ内で生成する。
 """
 
 import io
-from collections import Counter
+import re
+from collections import Counter, defaultdict
 from typing import List, Dict, Tuple, Optional
 
 import pandas as pd
@@ -19,9 +20,19 @@ def _load_labels_with_cache(
     label_cache: Optional[dict],
     filter_non_parts: bool = False,
     validate_ref_designators: bool = False,
+    original_filename: Optional[str] = None,
 ):
-    """キャッシュを利用してラベルを読み込む。(labels, info) を返す。"""
-    cache_key = (file_path, True, filter_non_parts, validate_ref_designators)
+    """キャッシュを利用してラベルを読み込む。(labels, info) を返す。
+
+    extract_drawing_numbers_option=True を渡すことで、同一図番を持つ複数の
+    タイトルブロックが1ファイル内に存在する図面（例: 複数シートを1つの
+    DXFにまとめた図面）でも、タイトル/サブタイトル抽出が対象タイトルブロック
+    のグループ内に限定される（extract_labels.py の main_drawing_group 機構）。
+    この呼び出しで extract_drawing_numbers_option を省略すると、グループ制限が
+    働かず全ブロックのラベルが候補に混在し、対象ブロックにたまたま欠落した
+    ラベルがあると別ブロックの内容を誤って拾う（2026-07-29 実データで発覚）。
+    """
+    cache_key = (file_path, True, filter_non_parts, validate_ref_designators, original_filename)
     if label_cache is not None and cache_key in label_cache:
         return label_cache[cache_key]
 
@@ -32,6 +43,8 @@ def _load_labels_with_cache(
         include_coordinates=True,
         validate_ref_designators=validate_ref_designators,
         extract_title_option=True,
+        extract_drawing_numbers_option=True,
+        original_filename=original_filename,
     )
     result = (labels, info)
     if label_cache is not None:
@@ -68,22 +81,37 @@ def group_labels_by_coordinate(rounded_labels: List[Tuple[str, float, float]]):
 def compute_label_differences(
     new_file: str,
     old_file: str,
-    tolerance: float = 0.01,
+    tolerance: float = 0.05,
     label_cache: Optional[dict] = None,
     filter_non_parts: bool = False,
     validate_ref_designators: bool = False,
+    ignore_moved_labels: bool = False,
+    new_file_original_name: Optional[str] = None,
 ):
     """
     ラベルを抽出（ブロック展開を含む）し、変更候補・未変更候補を計算する。
+
+    Args:
+        ignore_moved_labels: True の場合、同一ラベルの削除件数・追加件数が一致する
+            分を「移動しただけ」とみなし、座標が異なっていても変更候補から除外する
+            （reclassify_moved_labels 参照）。
+        new_file_original_name: new_file のアップロード時の元ファイル名（temp_path
+            ではなく図番を含む本来のファイル名）。図番の所属タイトルブロック判定
+            （優先順位1: ファイル名照合）に使う。省略時はファイル名一致に頼れず、
+            座標ベースのフォールバック判定になる（extract_labels.determine_drawing_number_types
+            参照）。
 
     Returns
     -------
     tuple(list, list, dict)
         change_rows: 変更候補（座標と旧/新ラベルを含む辞書のリスト）
-        unchanged_entries: 同一座標で一致したラベル情報のリスト
+        unchanged_entries: 同一座標で一致した（または移動とみなされた）ラベル情報のリスト
         extra_info: {'labels_new': [...], 'invalid_ref_designators': [...]}
     """
-    labels_new, info_new = _load_labels_with_cache(new_file, label_cache, filter_non_parts, validate_ref_designators)
+    labels_new, info_new = _load_labels_with_cache(
+        new_file, label_cache, filter_non_parts, validate_ref_designators,
+        original_filename=new_file_original_name,
+    )
     labels_old, _ = _load_labels_with_cache(old_file, label_cache, filter_non_parts, False)
 
     rounded_new = round_labels_with_coordinates(labels_new, tolerance)
@@ -93,6 +121,8 @@ def compute_label_differences(
     grouped_old = group_labels_by_coordinate(rounded_old)
 
     change_rows, unchanged_entries = find_label_change_pairs(grouped_new, grouped_old)
+    if ignore_moved_labels:
+        change_rows, unchanged_entries = reclassify_moved_labels(change_rows, unchanged_entries)
     change_rows.sort(key=lambda r: ((r['Old Label'] or ''), (r['New Label'] or '')))
 
     extra_info = {
@@ -162,29 +192,112 @@ def find_label_change_pairs(group_new, group_old):
     return change_rows, unchanged_entries
 
 
-def filter_unchanged_by_prefix(unchanged_entries, prefixes: List[str]):
-    """指定された接頭辞で未変更ラベルを絞り込み、座標ごとに件数を集計する。"""
-    if not prefixes:
-        return []
+# 「移動しただけ」の再分類から除外するラベル文字列（注記・特記事項用の記号）。
+_MOVED_LABEL_EXCLUDE_CHARS = ('☆',)
 
-    aggregated = {}
-    for entry in unchanged_entries:
-        label = entry['label']
-        if any(label.startswith(prefix) for prefix in prefixes):
-            coord = entry['coordinate']
-            key = (label, coord[0], coord[1])
-            aggregated[key] = aggregated.get(key, 0) + entry['count']
 
-    rows = [
-        {
-            'Label': label,
-            'Count': count,
-            'Coordinate X': x,
-            'Coordinate Y': y
-        }
-        for (label, x, y), count in sorted(aggregated.items(), key=lambda item: (item[0][0], item[0][1], item[0][2]))
-    ]
-    return rows
+def reclassify_moved_labels(change_rows, unchanged_entries):
+    """回路ブロックの移動により座標だけが変わったラベルを「変更なし」に振り替える。
+
+    find_label_change_pairs() は座標単位でしか突き合わせないため、ラベルの集合が
+    そのまま別の座標へ丸ごと移動すると、移動元では「削除」、移動先では「追加」として
+    検出される。同一ラベル文字列の削除件数・追加件数がちょうど一致する分は「移動した
+    だけ」とみなし、change_rows から取り除いて unchanged_entries に振り替える。
+
+    対象になるのは Old Label のみ（削除）・New Label のみ（追加）の行だけで、
+    同一座標での名称変更（Old/New 両方が存在する行）には影響しない。
+
+    「☆」を含むラベル（注記・特記事項として使われることが多い）は対象外とし、
+    件数が一致していても常に変更候補のまま残す。
+
+    注意（呼び出し元に伝えるべきリスク）: 座標を見ずに件数だけで判定するため、
+    たまたま同じラベル名の部品が「別の場所で削除」され「別の無関係な場所に同名の
+    部品が新規追加」された場合も区別できず「移動」とみなされる。また、同一ラベルが
+    複数箇所で移動した場合の新旧座標の対応付けは一意ではなく、座標順のソートで
+    機械的に対応付ける（実害はないが、対応関係自体に意味はない）。
+
+    Args:
+        change_rows: find_label_change_pairs() の戻り値（1つ目）
+        unchanged_entries: find_label_change_pairs() の戻り値（2つ目）
+
+    Returns:
+        tuple(list, list): (再分類後の change_rows, 移動分を追加した unchanged_entries)
+    """
+    deleted_by_label = defaultdict(list)  # label -> [change_row, ...]（New Label が None）
+    added_by_label = defaultdict(list)    # label -> [change_row, ...]（Old Label が None）
+    other_rows = []
+
+    for row in change_rows:
+        old_label, new_label = row['Old Label'], row['New Label']
+        if old_label is not None and new_label is None:
+            deleted_by_label[old_label].append(row)
+        elif old_label is None and new_label is not None:
+            added_by_label[new_label].append(row)
+        else:
+            other_rows.append(row)
+
+    remaining_rows = list(other_rows)
+    moved_entries = []
+
+    for label in sorted(set(deleted_by_label) | set(added_by_label)):
+        if any(ch in label for ch in _MOVED_LABEL_EXCLUDE_CHARS):
+            remaining_rows.extend(deleted_by_label.get(label, []))
+            remaining_rows.extend(added_by_label.get(label, []))
+            continue
+
+        deleted_rows = sorted(deleted_by_label.get(label, []),
+                               key=lambda r: (r['Coordinate X'], r['Coordinate Y']))
+        added_rows = sorted(added_by_label.get(label, []),
+                             key=lambda r: (r['Coordinate X'], r['Coordinate Y']))
+        matched = min(len(deleted_rows), len(added_rows))
+
+        for i in range(matched):
+            new_row = added_rows[i]
+            moved_entries.append({
+                'label': label,
+                'count': 1,
+                'coordinate': (new_row['Coordinate X'], new_row['Coordinate Y']),
+            })
+
+        remaining_rows.extend(deleted_rows[matched:])
+        remaining_rows.extend(added_rows[matched:])
+
+    return remaining_rows, unchanged_entries + moved_entries
+
+
+def filter_change_rows_by_patterns(change_rows: List[Dict], patterns: List[str]) -> List[Dict]:
+    """差分抽出するラベルの先頭文字列（正規表現）で change_rows を絞り込む。
+
+    Old Label・New Label のいずれかがパターンのいずれかに先頭一致すれば、
+    その行を残す（名称変更で片方だけ一致する場合も残る。フィルタ非該当←→該当へ
+    改名されたラベルが「追加のみ」「削除のみ」として誤検出されるのを避けるため、
+    ラベル比較そのもの〈compute_label_differences〉は全ラベルで行い、算出後の
+    change_rows だけをここで絞り込む設計）。
+
+    patterns が空リストの場合はフィルタをかけず、change_rows をそのまま返す
+    （config.LabelFilterConfig.DIFF_LABEL_PREFIX_PATTERNS の既定値）。
+
+    Args:
+        change_rows: find_label_change_pairs()/reclassify_moved_labels() の戻り値
+        patterns: 正規表現文字列のリスト（re.match で先頭一致判定）
+
+    Returns:
+        list: 絞り込み後の change_rows
+
+    Raises:
+        re.error: patterns に不正な正規表現が含まれる場合
+    """
+    if not patterns:
+        return change_rows
+
+    compiled = [re.compile(p) for p in patterns]
+
+    def _matches(label):
+        if label is None:
+            return False
+        return any(c.match(label) for c in compiled)
+
+    return [row for row in change_rows if _matches(row['Old Label']) or _matches(row['New Label'])]
 
 
 def build_diff_labels_workbook(
@@ -266,26 +379,6 @@ def build_diff_labels_workbook(
                 invalid_df.to_excel(writer, sheet_name='Invalid', index=False)
                 format_sheet(writer, 'Invalid', invalid_df)
 
-    output.seek(0)
-    return output.getvalue()
-
-
-def build_unchanged_labels_workbook(sheets: List[Dict]) -> bytes:
-    """unchanged_labels.xlsx のバイナリデータを生成する。"""
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        if not sheets:
-            empty_df = pd.DataFrame(columns=['Label', 'Count', 'Coordinate X', 'Coordinate Y'])
-            empty_df.to_excel(writer, sheet_name='NoData', index=False)
-            format_sheet(writer, 'NoData', empty_df)
-        else:
-            used_names = set()
-            for sheet in sheets:
-                sheet_name = ensure_unique_sheet_name(sheet.get('sheet_name') or "Sheet", used_names)
-                rows = sheet.get('rows') or []
-                df = pd.DataFrame(rows, columns=['Label', 'Count', 'Coordinate X', 'Coordinate Y'])
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-                format_sheet(writer, sheet_name, df)
     output.seek(0)
     return output.getvalue()
 
