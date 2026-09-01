@@ -167,24 +167,24 @@ def find_label_change_pairs(group_new, group_old):
 
         for i in range(pairable):
             change_rows.append({
-                'Coordinate X': coord[0],
-                'Coordinate Y': coord[1],
+                'X': coord[0],
+                'Y': coord[1],
                 'Old Label': old_only[i],
                 'New Label': new_only[i]
             })
 
         for leftover in old_only[pairable:]:
             change_rows.append({
-                'Coordinate X': coord[0],
-                'Coordinate Y': coord[1],
+                'X': coord[0],
+                'Y': coord[1],
                 'Old Label': leftover,
                 'New Label': None
             })
 
         for leftover in new_only[pairable:]:
             change_rows.append({
-                'Coordinate X': coord[0],
-                'Coordinate Y': coord[1],
+                'X': coord[0],
+                'Y': coord[1],
                 'Old Label': None,
                 'New Label': leftover
             })
@@ -246,9 +246,9 @@ def reclassify_moved_labels(change_rows, unchanged_entries):
             continue
 
         deleted_rows = sorted(deleted_by_label.get(label, []),
-                               key=lambda r: (r['Coordinate X'], r['Coordinate Y']))
+                               key=lambda r: (r['X'], r['Y']))
         added_rows = sorted(added_by_label.get(label, []),
-                             key=lambda r: (r['Coordinate X'], r['Coordinate Y']))
+                             key=lambda r: (r['X'], r['Y']))
         matched = min(len(deleted_rows), len(added_rows))
 
         for i in range(matched):
@@ -256,7 +256,7 @@ def reclassify_moved_labels(change_rows, unchanged_entries):
             moved_entries.append({
                 'label': label,
                 'count': 1,
-                'coordinate': (new_row['Coordinate X'], new_row['Coordinate Y']),
+                'coordinate': (new_row['X'], new_row['Y']),
             })
 
         remaining_rows.extend(deleted_rows[matched:])
@@ -326,7 +326,7 @@ def build_diff_labels_workbook(
         workbook = writer.book
 
         if not sheets and summary_data is None and total_data is None and invalid_data is None:
-            empty_df = pd.DataFrame(columns=['Coordinate X', 'Coordinate Y', 'Old Label', 'New Label'])
+            empty_df = pd.DataFrame(columns=['X', 'Y', 'Old Label', 'New Label'])
             empty_df.to_excel(writer, sheet_name='NoData', index=False)
             format_sheet(writer, 'NoData', empty_df)
         else:
@@ -366,7 +366,7 @@ def build_diff_labels_workbook(
             # ── ペアシート ──
             for sheet, sheet_name in zip(sheets, pair_sheet_names):
                 rows = sheet.get('rows') or []
-                df = pd.DataFrame(rows, columns=['Coordinate X', 'Coordinate Y', 'Old Label', 'New Label'])
+                df = pd.DataFrame(rows, columns=['X', 'Y', 'Old Label', 'New Label'])
                 old_col = sheet.get('old_label_name', 'Old Label')
                 new_col = sheet.get('new_label_name', 'New Label')
                 df.rename(columns={'Old Label': old_col, 'New Label': new_col}, inplace=True)
@@ -401,7 +401,7 @@ def format_sheet(writer, sheet_name: str, df: pd.DataFrame):
     worksheet = writer.sheets[sheet_name]
     if not df.empty:
         for col_idx, column in enumerate(df.columns):
-            if column in ('Coordinate X', 'Coordinate Y'):
+            if column in ('X', 'Y'):
                 width = 14
             elif column in ('Old Label', 'New Label', 'Label'):
                 width = 100
