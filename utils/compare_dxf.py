@@ -12,6 +12,8 @@ import tempfile
 import os
 import gc
 
+from .common_utils import is_invisible
+
 # 高精度計算設定
 getcontext().prec = 50
 
@@ -355,16 +357,20 @@ class EntityExpander:
             entity_type = entity.dxftype()
             
             if entity_type == 'INSERT':
+                # INSERT自身にinvisible属性（非表示設定）が立っていれば、中身ごと
+                # 丸ごと除外する（is_invisibleのdocstring参照）。
+                if is_invisible(entity):
+                    continue
                 try:
                     transform_matrix = self.transformer.create_transformation_matrix(entity)
                     block_name = entity.dxf.name
-                    
+
                     if block_name in doc.blocks:
                         block = doc.blocks[block_name]
-                        
+
                         # ブロック内エンティティを変換
                         for block_entity in block:
-                            if block_entity.dxftype() not in ['ATTDEF']:
+                            if block_entity.dxftype() not in ['ATTDEF'] and not is_invisible(block_entity):
                                 absolute_entity = self.transform_entity_to_absolute(
                                     block_entity, transform_matrix)
                                 if absolute_entity:
@@ -379,10 +385,12 @@ class EntityExpander:
                                         )
                                     }
                                     expanded_entities.append(absolute_entity)
-                        
+
                         # ATTRIB処理
                         if hasattr(entity, 'attribs'):
                             for attrib in entity.attribs:
+                                if is_invisible(attrib):
+                                    continue
                                 identity_matrix = np.eye(4)
                                 absolute_attrib = self.transform_entity_to_absolute(
                                     attrib, identity_matrix)
@@ -393,12 +401,14 @@ class EntityExpander:
                                         'is_insert_attrib': True
                                     }
                                     expanded_entities.append(absolute_attrib)
-                                    
+
                 except Exception as e:
                     logger.warning(f"Error expanding INSERT {block_name}: {e}")
-            
+
             elif entity_type != 'ATTDEF':
-                # 直接エンティティ
+                # 直接エンティティ（invisible属性が立っていれば除外）
+                if is_invisible(entity):
+                    continue
                 identity_matrix = np.eye(4)
                 absolute_entity = self.transform_entity_to_absolute(entity, identity_matrix)
                 if absolute_entity:
