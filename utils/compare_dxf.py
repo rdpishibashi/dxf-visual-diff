@@ -175,7 +175,42 @@ class EntityExpander:
             'objectid', 'uuid', 'app_data', 'doc', 'entitydb', 'is_alive',
             'is_virtual', 'is_copy', 'soft_pointer_ids', 'hard_pointer_ids'
         }
-    
+        # レイヤー名 → 表示されるか（off でも frozen でもない）のマップ。
+        # expand_insert_entities() の先頭で対象 doc から構築する
+        # （DXF-diff-manager 2026-09-16の横展開に伴い移植）。
+        self._layer_visible: Dict[str, bool] = {}
+
+    def _build_layer_visibility(self, doc) -> None:
+        """レイヤー名 → 可視（off でも frozen でもない）かのマップを構築する。
+
+        off/frozen なレイヤー上のエンティティは図面に表示されない。ビジュアル差分は
+        「見えている図形」を比較対象とすべきなので、これらを抽出段階で除外するために使う。
+        重なった旧タイトルブロックや改訂履歴メモ等が off/frozen レイヤーに残っている
+        DXF で、新旧同一の不可視テキストが UNCHANGED として差分DXFに描画される不具合の対策
+        （DXF-diff-manager で実データ EE2505-611-79B_vs_79A にて確認: ブロック
+        JZB_0004 の MTEXT 'EE2505-611-57B' 等が off+frozen レイヤー上にあった）。
+        """
+        vis = {}
+        try:
+            for layer in doc.layers:
+                try:
+                    vis[layer.dxf.name] = not (layer.is_off() or layer.is_frozen())
+                except Exception:
+                    vis[layer.dxf.name] = True  # 判定不能時は表示扱い（安全側）
+        except Exception:
+            pass
+        self._layer_visible = vis
+
+    def _is_layer_visible(self, layer_name) -> bool:
+        """レイヤーが表示される（off/frozen でない）か。未知レイヤー・'0' は表示扱い。
+
+        '0' はブロック参照のレイヤーを継承するため、ここでは表示扱いにし、
+        参照元 INSERT のレイヤー可視性は呼び出し側で別途判定する。
+        """
+        if not layer_name or layer_name == '0':
+            return True
+        return self._layer_visible.get(layer_name, True)
+
     def safe_get_dxf_attributes(self, entity) -> Dict:
         """安全なDXF属性取得"""
         try:
@@ -351,15 +386,19 @@ class EntityExpander:
     def expand_insert_entities(self, doc, doc_label: str) -> List[Dict]:
         """INSERTエンティティを展開して絶対座標エンティティリストを作成"""
         expanded_entities = []
-        
+
+        # off/frozen レイヤー上のエンティティ（＝図面に表示されない）を除外するための
+        # レイヤー可視性マップを構築する（DXF-diff-manager 2026-09-16の横展開に伴い移植）。
+        self._build_layer_visibility(doc)
+
         msp = doc.modelspace()
         for entity in msp:
             entity_type = entity.dxftype()
-            
+
             if entity_type == 'INSERT':
-                # INSERT自身にinvisible属性（非表示設定）が立っていれば、中身ごと
-                # 丸ごと除外する（is_invisibleのdocstring参照）。
-                if is_invisible(entity):
+                # INSERT自身が off/frozen レイヤーにあるか、invisible属性（非表示設定）
+                # が立っていれば、中身ごと丸ごと除外する（is_invisibleのdocstring参照）。
+                if not self._is_layer_visible(getattr(entity.dxf, 'layer', '0')) or is_invisible(entity):
                     continue
                 try:
                     transform_matrix = self.transformer.create_transformation_matrix(entity)
@@ -368,9 +407,13 @@ class EntityExpander:
                     if block_name in doc.blocks:
                         block = doc.blocks[block_name]
 
-                        # ブロック内エンティティを変換
+                        # ブロック内エンティティを変換（off/frozen レイヤー上のものは除外。
+                        # レイヤー'0'はINSERTのレイヤーを継承するため表示扱い——呼び出し前に
+                        # INSERT側の可視性は確認済み）。
                         for block_entity in block:
-                            if block_entity.dxftype() not in ['ATTDEF'] and not is_invisible(block_entity):
+                            if (block_entity.dxftype() not in ['ATTDEF']
+                                    and self._is_layer_visible(getattr(block_entity.dxf, 'layer', '0'))
+                                    and not is_invisible(block_entity)):
                                 absolute_entity = self.transform_entity_to_absolute(
                                     block_entity, transform_matrix)
                                 if absolute_entity:
@@ -406,8 +449,8 @@ class EntityExpander:
                     logger.warning(f"Error expanding INSERT {block_name}: {e}")
 
             elif entity_type != 'ATTDEF':
-                # 直接エンティティ（invisible属性が立っていれば除外）
-                if is_invisible(entity):
+                # 直接エンティティ（off/frozen レイヤー・invisible属性なら表示されないので除外）
+                if not self._is_layer_visible(getattr(entity.dxf, 'layer', '0')) or is_invisible(entity):
                     continue
                 identity_matrix = np.eye(4)
                 absolute_entity = self.transform_entity_to_absolute(entity, identity_matrix)
