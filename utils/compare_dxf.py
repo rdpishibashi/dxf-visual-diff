@@ -387,7 +387,14 @@ class EntityExpander:
             transformed_attrs['height'] = clean_attrs['height'] * scale_y
     
     def expand_insert_entities(self, doc, doc_label: str) -> List[Dict]:
-        """INSERTエンティティを展開して絶対座標エンティティリストを作成"""
+        """INSERTエンティティを展開して絶対座標エンティティリストを作成
+        （ブロック内にさらにINSERTがある「ネストINSERT」も再帰的に展開する。
+        2026-09-16、DXF-diff-managerから移植。以前は1段階のみの展開だったため、
+        二重INSERT構造を持つブロック内の図形が展開されず、代替テキスト
+        `[INSERT]` として出力されていた——ユーザー報告により発覚。実データ
+        EE3273-039-06B_vs_EE4153-039-06B で、JZB_0008/0009/0019〜0027 の
+        11ブロックがそれぞれ内部に2個のINSERT（匿名ブロック）を持ち、
+        計22個の記号が欠落していたことを確認）"""
         expanded_entities = []
 
         # off/frozen レイヤー上のエンティティ（＝図面に表示されない）を除外するための
@@ -405,51 +412,9 @@ class EntityExpander:
                     continue
                 try:
                     transform_matrix = self.transformer.create_transformation_matrix(entity)
-                    block_name = entity.dxf.name
-
-                    if block_name in doc.blocks:
-                        block = doc.blocks[block_name]
-
-                        # ブロック内エンティティを変換（off/frozen レイヤー上のものは除外。
-                        # レイヤー'0'はINSERTのレイヤーを継承するため表示扱い——呼び出し前に
-                        # INSERT側の可視性は確認済み）。
-                        for block_entity in block:
-                            if (block_entity.dxftype() not in ['ATTDEF']
-                                    and self._is_layer_visible(getattr(block_entity.dxf, 'layer', '0'))
-                                    and not is_invisible(block_entity)):
-                                absolute_entity = self.transform_entity_to_absolute(
-                                    block_entity, transform_matrix)
-                                if absolute_entity:
-                                    absolute_entity['insert_info'] = {
-                                        'block_name': block_name,
-                                        'insert_point': tuple(entity.dxf.insert),
-                                        'rotation': getattr(entity.dxf, 'rotation', 0.0),
-                                        'scale': (
-                                            getattr(entity.dxf, 'xscale', 1.0),
-                                            getattr(entity.dxf, 'yscale', 1.0),
-                                            getattr(entity.dxf, 'zscale', 1.0)
-                                        )
-                                    }
-                                    expanded_entities.append(absolute_entity)
-
-                        # ATTRIB処理
-                        if hasattr(entity, 'attribs'):
-                            for attrib in entity.attribs:
-                                if is_invisible(attrib):
-                                    continue
-                                identity_matrix = np.eye(4)
-                                absolute_attrib = self.transform_entity_to_absolute(
-                                    attrib, identity_matrix)
-                                if absolute_attrib:
-                                    absolute_attrib['insert_info'] = {
-                                        'block_name': block_name,
-                                        'insert_point': tuple(entity.dxf.insert),
-                                        'is_insert_attrib': True
-                                    }
-                                    expanded_entities.append(absolute_attrib)
-
+                    self._expand_insert_recursive(doc, entity, transform_matrix, expanded_entities)
                 except Exception as e:
-                    logger.warning(f"Error expanding INSERT {block_name}: {e}")
+                    logger.warning(f"Error expanding INSERT {entity.dxf.name}: {e}")
 
             elif entity_type != 'ATTDEF':
                 # 直接エンティティ（off/frozen レイヤー・invisible属性なら表示されないので除外）
@@ -462,6 +427,72 @@ class EntityExpander:
                     expanded_entities.append(absolute_entity)
 
         return expanded_entities
+
+    def _expand_insert_recursive(self, doc, insert_entity, transform_matrix: np.ndarray,
+                                  expanded_entities: List[Dict], depth: int = 0,
+                                  max_depth: int = 20) -> None:
+        """1つのINSERTエンティティをブロック内容に展開し、結果を expanded_entities に追加する。
+        ブロック内にネストしたINSERTがあれば、親の変換行列と合成した行列で再帰展開する。
+        depth は循環参照（ブロックが自分自身を間接的に参照する等）による無限再帰を防ぐガード。"""
+        if depth > max_depth:
+            logger.warning(
+                f"INSERT nesting exceeded max depth ({max_depth}) at block "
+                f"'{insert_entity.dxf.name}', stopping recursion")
+            return
+
+        block_name = insert_entity.dxf.name
+        if block_name not in doc.blocks:
+            return
+        block = doc.blocks[block_name]
+
+        for block_entity in block:
+            if block_entity.dxftype() == 'ATTDEF':
+                continue
+
+            # ブロック定義内エンティティが明示的な off/frozen レイヤー上にある場合、
+            # 参照元 INSERT のレイヤーに関わらず図面に表示されないため除外する。
+            # レイヤー'0'はINSERTのレイヤーを継承する（呼び出し前にINSERT側の
+            # 可視性は確認済みなので表示扱いでよい）。invisible属性についても同様に
+            # ここで除外する（ネストしたINSERT自身がinvisibleな場合もこのチェックで
+            # 再帰展開ごと止まる）。
+            if not self._is_layer_visible(getattr(block_entity.dxf, 'layer', '0')) or is_invisible(block_entity):
+                continue
+
+            if block_entity.dxftype() == 'INSERT':
+                nested_local_matrix = self.transformer.create_transformation_matrix(block_entity)
+                nested_matrix = transform_matrix @ nested_local_matrix
+                self._expand_insert_recursive(
+                    doc, block_entity, nested_matrix, expanded_entities, depth + 1, max_depth)
+                continue
+
+            absolute_entity = self.transform_entity_to_absolute(block_entity, transform_matrix)
+            if absolute_entity:
+                absolute_entity['insert_info'] = {
+                    'block_name': block_name,
+                    'insert_point': tuple(insert_entity.dxf.insert),
+                    'rotation': getattr(insert_entity.dxf, 'rotation', 0.0),
+                    'scale': (
+                        getattr(insert_entity.dxf, 'xscale', 1.0),
+                        getattr(insert_entity.dxf, 'yscale', 1.0),
+                        getattr(insert_entity.dxf, 'zscale', 1.0)
+                    )
+                }
+                expanded_entities.append(absolute_entity)
+
+        # ATTRIB処理
+        if hasattr(insert_entity, 'attribs'):
+            for attrib in insert_entity.attribs:
+                if is_invisible(attrib):
+                    continue
+                identity_matrix = np.eye(4)
+                absolute_attrib = self.transform_entity_to_absolute(attrib, identity_matrix)
+                if absolute_attrib:
+                    absolute_attrib['insert_info'] = {
+                        'block_name': block_name,
+                        'insert_point': tuple(insert_entity.dxf.insert),
+                        'is_insert_attrib': True
+                    }
+                    expanded_entities.append(absolute_attrib)
 
 
 def _translate_point(point, dx: float, dy: float):
