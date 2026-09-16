@@ -20,6 +20,11 @@ getcontext().prec = 50
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# 平行移動（オフセット）の対象となる座標属性。
+# EntityExpander._transform_coordinate_attributes() と translate_absolute_entity()
+# の両方から参照する（取りこぼし防止のため一元管理）。
+COORDINATE_ATTRIBUTES = ['insert', 'center', 'start', 'end', 'location', 'base_point']
+
 
 class ToleranceConfig:
     """許容誤差設定クラス"""
@@ -299,9 +304,7 @@ class EntityExpander:
     def _transform_coordinate_attributes(self, clean_attrs: Dict, transformed_attrs: Dict,
                                        transform_matrix: np.ndarray):
         """座標属性を変換"""
-        coordinate_attrs = ['insert', 'center', 'start', 'end', 'location', 'base_point']
-
-        for attr_name in coordinate_attrs:
+        for attr_name in COORDINATE_ATTRIBUTES:
             if attr_name in clean_attrs:
                 original_point = clean_attrs[attr_name]
                 try:
@@ -384,7 +387,14 @@ class EntityExpander:
             transformed_attrs['height'] = clean_attrs['height'] * scale_y
     
     def expand_insert_entities(self, doc, doc_label: str) -> List[Dict]:
-        """INSERTエンティティを展開して絶対座標エンティティリストを作成"""
+        """INSERTエンティティを展開して絶対座標エンティティリストを作成
+        （ブロック内にさらにINSERTがある「ネストINSERT」も再帰的に展開する。
+        2026-09-16、DXF-diff-managerから移植。以前は1段階のみの展開だったため、
+        二重INSERT構造を持つブロック内の図形が展開されず、代替テキスト
+        `[INSERT]` として出力されていた——ユーザー報告により発覚。実データ
+        EE3273-039-06B_vs_EE4153-039-06B で、JZB_0008/0009/0019〜0027 の
+        11ブロックがそれぞれ内部に2個のINSERT（匿名ブロック）を持ち、
+        計22個の記号が欠落していたことを確認）"""
         expanded_entities = []
 
         # off/frozen レイヤー上のエンティティ（＝図面に表示されない）を除外するための
@@ -402,51 +412,9 @@ class EntityExpander:
                     continue
                 try:
                     transform_matrix = self.transformer.create_transformation_matrix(entity)
-                    block_name = entity.dxf.name
-
-                    if block_name in doc.blocks:
-                        block = doc.blocks[block_name]
-
-                        # ブロック内エンティティを変換（off/frozen レイヤー上のものは除外。
-                        # レイヤー'0'はINSERTのレイヤーを継承するため表示扱い——呼び出し前に
-                        # INSERT側の可視性は確認済み）。
-                        for block_entity in block:
-                            if (block_entity.dxftype() not in ['ATTDEF']
-                                    and self._is_layer_visible(getattr(block_entity.dxf, 'layer', '0'))
-                                    and not is_invisible(block_entity)):
-                                absolute_entity = self.transform_entity_to_absolute(
-                                    block_entity, transform_matrix)
-                                if absolute_entity:
-                                    absolute_entity['insert_info'] = {
-                                        'block_name': block_name,
-                                        'insert_point': tuple(entity.dxf.insert),
-                                        'rotation': getattr(entity.dxf, 'rotation', 0.0),
-                                        'scale': (
-                                            getattr(entity.dxf, 'xscale', 1.0),
-                                            getattr(entity.dxf, 'yscale', 1.0),
-                                            getattr(entity.dxf, 'zscale', 1.0)
-                                        )
-                                    }
-                                    expanded_entities.append(absolute_entity)
-
-                        # ATTRIB処理
-                        if hasattr(entity, 'attribs'):
-                            for attrib in entity.attribs:
-                                if is_invisible(attrib):
-                                    continue
-                                identity_matrix = np.eye(4)
-                                absolute_attrib = self.transform_entity_to_absolute(
-                                    attrib, identity_matrix)
-                                if absolute_attrib:
-                                    absolute_attrib['insert_info'] = {
-                                        'block_name': block_name,
-                                        'insert_point': tuple(entity.dxf.insert),
-                                        'is_insert_attrib': True
-                                    }
-                                    expanded_entities.append(absolute_attrib)
-
+                    self._expand_insert_recursive(doc, entity, transform_matrix, expanded_entities)
                 except Exception as e:
-                    logger.warning(f"Error expanding INSERT {block_name}: {e}")
+                    logger.warning(f"Error expanding INSERT {entity.dxf.name}: {e}")
 
             elif entity_type != 'ATTDEF':
                 # 直接エンティティ（off/frozen レイヤー・invisible属性なら表示されないので除外）
@@ -457,8 +425,110 @@ class EntityExpander:
                 if absolute_entity:
                     absolute_entity['is_direct_modelspace'] = True
                     expanded_entities.append(absolute_entity)
-        
+
         return expanded_entities
+
+    def _expand_insert_recursive(self, doc, insert_entity, transform_matrix: np.ndarray,
+                                  expanded_entities: List[Dict], depth: int = 0,
+                                  max_depth: int = 20) -> None:
+        """1つのINSERTエンティティをブロック内容に展開し、結果を expanded_entities に追加する。
+        ブロック内にネストしたINSERTがあれば、親の変換行列と合成した行列で再帰展開する。
+        depth は循環参照（ブロックが自分自身を間接的に参照する等）による無限再帰を防ぐガード。"""
+        if depth > max_depth:
+            logger.warning(
+                f"INSERT nesting exceeded max depth ({max_depth}) at block "
+                f"'{insert_entity.dxf.name}', stopping recursion")
+            return
+
+        block_name = insert_entity.dxf.name
+        if block_name not in doc.blocks:
+            return
+        block = doc.blocks[block_name]
+
+        for block_entity in block:
+            if block_entity.dxftype() == 'ATTDEF':
+                continue
+
+            # ブロック定義内エンティティが明示的な off/frozen レイヤー上にある場合、
+            # 参照元 INSERT のレイヤーに関わらず図面に表示されないため除外する。
+            # レイヤー'0'はINSERTのレイヤーを継承する（呼び出し前にINSERT側の
+            # 可視性は確認済みなので表示扱いでよい）。invisible属性についても同様に
+            # ここで除外する（ネストしたINSERT自身がinvisibleな場合もこのチェックで
+            # 再帰展開ごと止まる）。
+            if not self._is_layer_visible(getattr(block_entity.dxf, 'layer', '0')) or is_invisible(block_entity):
+                continue
+
+            if block_entity.dxftype() == 'INSERT':
+                nested_local_matrix = self.transformer.create_transformation_matrix(block_entity)
+                nested_matrix = transform_matrix @ nested_local_matrix
+                self._expand_insert_recursive(
+                    doc, block_entity, nested_matrix, expanded_entities, depth + 1, max_depth)
+                continue
+
+            absolute_entity = self.transform_entity_to_absolute(block_entity, transform_matrix)
+            if absolute_entity:
+                absolute_entity['insert_info'] = {
+                    'block_name': block_name,
+                    'insert_point': tuple(insert_entity.dxf.insert),
+                    'rotation': getattr(insert_entity.dxf, 'rotation', 0.0),
+                    'scale': (
+                        getattr(insert_entity.dxf, 'xscale', 1.0),
+                        getattr(insert_entity.dxf, 'yscale', 1.0),
+                        getattr(insert_entity.dxf, 'zscale', 1.0)
+                    )
+                }
+                expanded_entities.append(absolute_entity)
+
+        # ATTRIB処理
+        if hasattr(insert_entity, 'attribs'):
+            for attrib in insert_entity.attribs:
+                if is_invisible(attrib):
+                    continue
+                identity_matrix = np.eye(4)
+                absolute_attrib = self.transform_entity_to_absolute(attrib, identity_matrix)
+                if absolute_attrib:
+                    absolute_attrib['insert_info'] = {
+                        'block_name': block_name,
+                        'insert_point': tuple(insert_entity.dxf.insert),
+                        'is_insert_attrib': True
+                    }
+                    expanded_entities.append(absolute_attrib)
+
+
+def _translate_point(point, dx: float, dy: float):
+    """座標点（2要素/3要素のタプル・リスト）を (dx, dy) だけ平行移動する"""
+    if len(point) >= 3:
+        return (point[0] + dx, point[1] + dy, point[2])
+    return (point[0] + dx, point[1] + dy)
+
+
+def translate_absolute_entity(absolute_entity: Dict, offset: Tuple[float, float]) -> Dict:
+    """
+    展開済みの絶対座標エンティティ（EntityExpander の出力）を、
+    ベクトル (dx, dy) だけ平行移動した新しい辞書として返す（元は変更しない）。
+
+    EntityExpander._apply_global_offset() が transform_point() の結果に
+    offset を加算するのと数値的に等価な操作を、展開後のデータに対して
+    事後的に行う。DXF の再パース・再展開（INSERT展開）は不要。
+
+    平行移動の対象は COORDINATE_ATTRIBUTES に列挙された座標属性と
+    'vertices'（LWPOLYLINE の頂点群）のみ。'major_axis'（方向ベクトル）や
+    'radius'/'height'/'rotation' 等のスカラー値は対象外
+    （EntityExpander._apply_global_offset と同じ扱い）。
+    """
+    dx, dy = offset
+    translated = dict(absolute_entity)
+    attrs = dict(absolute_entity.get('attributes', {}))
+
+    for attr_name in COORDINATE_ATTRIBUTES:
+        if attr_name in attrs and attrs[attr_name] is not None:
+            attrs[attr_name] = _translate_point(attrs[attr_name], dx, dy)
+
+    if 'vertices' in attrs and attrs['vertices']:
+        attrs['vertices'] = [_translate_point(v, dx, dy) for v in attrs['vertices']]
+
+    translated['attributes'] = attrs
+    return translated
 
 
 class SignatureGenerator:
@@ -732,7 +802,8 @@ class DiffAnalyzer:
 class LayerConfig:
     """レイヤー設定クラス"""
     
-    def __init__(self, deleted_color: int = 6, added_color: int = 4, unchanged_color: int = 7):
+    def __init__(self, deleted_color: int = 6, added_color: int = 4, unchanged_color: int = 7,
+                 unchanged_offset_color: int = 8):
         self.layer_settings = {
             'DELETED': {
                 'name': 'DELETED',
@@ -740,7 +811,7 @@ class LayerConfig:
                 'description': 'Entities present in file A but not in file B'
             },
             'ADDED': {
-                'name': 'ADDED', 
+                'name': 'ADDED',
                 'color': added_color,  # デフォルト: シアン
                 'description': 'Entities present in file B but not in file A'
             },
@@ -748,6 +819,11 @@ class LayerConfig:
                 'name': 'UNCHANGED',
                 'color': unchanged_color,  # デフォルト: 白/黒
                 'description': 'Entities present in both files'
+            },
+            'UNCHANGED_OFFSET': {
+                'name': 'UNCHANGED_OFFSET',
+                'color': unchanged_offset_color,  # デフォルト: 灰
+                'description': 'Entities matched after offset compensation (drawn at file B coordinates)'
             }
         }
     
@@ -941,23 +1017,29 @@ class OutputGenerator:
             logger.warning(f"Error ensuring Japanese text compatibility: {e}")
             # エラーの場合は元のファイルをそのまま使用
     
-    def create_diff_dxf(self, entities_a: Dict, entities_b: Dict, 
-                        deleted_hashes: Set[str], added_hashes: Set[str], 
-                        common_hashes: Set[str], output_file: str):
+    def create_diff_dxf(self, entities_a: Dict, entities_b: Dict,
+                        deleted_hashes: Set[str], added_hashes: Set[str],
+                        common_hashes: Set[str], output_file: str,
+                        unchanged_offset_hashes: Optional[Set[str]] = None):
         """差分DXFファイルを作成"""
         try:
             # R2018以降でより良いUnicode対応
             new_doc = ezdxf.new('R2018', setup=True)
             msp = new_doc.modelspace()
-            
+
             # レイヤーを作成
             layers = new_doc.layers
-            for diff_type in ['DELETED', 'ADDED', 'UNCHANGED']:
+            diff_types = ['DELETED', 'ADDED', 'UNCHANGED']
+            # UNCHANGED_OFFSET はオフセット補正で使われた場合のみレイヤーを作る
+            # （オフセット未使用時に空レイヤーを増やさないため）
+            if unchanged_offset_hashes:
+                diff_types.append('UNCHANGED_OFFSET')
+            for diff_type in diff_types:
                 layer_name = self.layer_config.get_layer_name(diff_type)
                 layer_color = self.layer_config.get_layer_color(diff_type)
                 layer = layers.new(layer_name)
                 layer.color = layer_color
-            
+
             # DELETED エンティティを追加
             layer_name = self.layer_config.get_layer_name('DELETED')
             layer_color = self.layer_config.get_layer_color('DELETED')
@@ -990,7 +1072,20 @@ class OutputGenerator:
                         absolute_entity = virtual_entity['absolute_entity']
                         self.create_entity_from_absolute(absolute_entity, msp, layer_name, layer_color)
                         break  # 最初のインスタンスのみ
-            
+
+            # UNCHANGED_OFFSET エンティティを追加
+            # （オフセット補正で初めて一致した要素。file B の座標で描画する）
+            if unchanged_offset_hashes:
+                layer_name = self.layer_config.get_layer_name('UNCHANGED_OFFSET')
+                layer_color = self.layer_config.get_layer_color('UNCHANGED_OFFSET')
+
+                for entity_hash in unchanged_offset_hashes:
+                    if entity_hash in entities_b:
+                        for location, virtual_entity in entities_b[entity_hash]:
+                            absolute_entity = virtual_entity['absolute_entity']
+                            self.create_entity_from_absolute(absolute_entity, msp, layer_name, layer_color)
+                            break  # 最初のインスタンスのみ
+
             # DXFファイルを保存（UTF-8エンコーディングで日本語テキストを保持）
             new_doc.saveas(output_file)
             
@@ -1008,9 +1103,16 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
                                        deleted_color: int = 6,
                                        added_color: int = 4,
                                        unchanged_color: int = 7,
+                                       unchanged_offset_color: int = 8,
                                        offset_b: Optional[Tuple[float, float]] = None) -> Tuple[bool, Optional[Dict[str, int]]]:
     """
     DXFファイル比較メイン処理（Streamlit用インターフェース）
+
+    オフセット補正（offset_b）は和集合型: 補正なしで一致した要素は従来どおり
+    UNCHANGED のまま残り、補正して初めて一致した要素だけが別レイヤー
+    UNCHANGED_OFFSET（file B の座標で描画）に追加される。ファイルBは常に
+    生の座標で展開されるため、ADDED/DELETED の座標にオフセットは適用されない
+    （offset_b はあくまで「一致判定を緩める」ためだけに使われる）。
 
     Args:
         file_a: 基準DXFファイルパス
@@ -1020,64 +1122,96 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         deleted_color: 削除エンティティの色（デフォルト: 6=マゼンタ）
         added_color: 追加エンティティの色（デフォルト: 4=シアン）
         unchanged_color: 変更なしエンティティの色（デフォルト: 7=白/黒）
-        offset_b: ファイルBに適用するオフセット (dx, dy) のタプル (オプション)
+        unchanged_offset_color: オフセット補正で一致したエンティティの色（デフォルト: 8=灰）
+        offset_b: ファイルBとの一致判定に使うオフセット (dx, dy) のタプル (オプション)。
+            座標のtolerance格子（既定0.05）の倍数でない場合、丸め先が1格子ずれて
+            一致し損ねる要素が出ることがある。
 
     Returns:
         Tuple[bool, Optional[Dict[str, int]]]: (成功フラグ, エンティティ数情報)
             エンティティ数情報は以下のキーを含む辞書:
                 - deleted_entities: 削除されたエンティティ数
                 - added_entities: 追加されたエンティティ数
-                - unchanged_entities: 変更なしエンティティ数
+                - unchanged_entities: 変更なしエンティティ数（オフセット無しで一致）
+                - unchanged_offset_entities: オフセット補正で一致したエンティティ数
                 - diff_entities: 差分エンティティ数（削除+追加）
-                - total_entities: 総エンティティ数
+                - total_entities: 総エンティティ数（unchanged_offset_entities を含む）
     """
     try:
         # 設定の初期化
         tolerance_config = ToleranceConfig(tolerance)
         transformer = CoordinateTransformer(tolerance_config, debug=False)
         expander_a = EntityExpander(transformer, debug=False, global_offset=None)
-        expander_b = EntityExpander(transformer, debug=False, global_offset=offset_b)
+        # ファイルBは常に生の座標で展開する（和集合型: オフセットは一致判定にのみ使う。
+        # B全体をあらかじめ平行移動する旧・置き換え型の挙動はここでは行わない）
+        expander_b = EntityExpander(transformer, debug=False, global_offset=None)
         signature_generator = SignatureGenerator(transformer, debug=False)
         diff_analyzer = DiffAnalyzer(signature_generator, debug=False)
-        layer_config = LayerConfig(deleted_color, added_color, unchanged_color)
+        layer_config = LayerConfig(deleted_color, added_color, unchanged_color, unchanged_offset_color)
         output_generator = OutputGenerator(transformer, layer_config, debug=False)
 
         # DXFファイル読み込み
         doc_a = ezdxf.readfile(file_a)
         doc_b = ezdxf.readfile(file_b)
 
-        # エンティティ抽出（ファイルBにはオフセット適用済み）
+        # エンティティ抽出（両ファイルとも生の座標で展開）
         entities_a, data_a, locations_a = diff_analyzer.extract_entities_from_doc(
             doc_a, "A", expander_a)
         entities_b, data_b, locations_b = diff_analyzer.extract_entities_from_doc(
             doc_b, "B", expander_b)
-        
-        # 差分計算
+
+        # 差分計算（第1パス: オフセット無しでの完全一致）
         hashes_a = set(entities_a.keys())
         hashes_b = set(entities_b.keys())
 
-        deleted_hashes = hashes_a - hashes_b
-        added_hashes = hashes_b - hashes_a
         common_hashes = hashes_a & hashes_b
+
+        # 第2パス（和集合型オフセット補正）:
+        # 完全一致しなかった B 側の要素を (dx, dy) だけ平行移動して再ハッシュし、
+        # A 側と一致するものを「オフセット一致」として UNCHANGED_OFFSET に振り分ける。
+        # DXFの再パース・再展開は行わず、展開済みエンティティ（B）を平行移動するのみ
+        # （EntityExpander が offset 適用済みで展開するのと数値的に等価）。
+        offset_matched_b_hashes: Set[str] = set()
+        matched_a_hashes_by_offset: Set[str] = set()
+
+        has_offset = offset_b is not None and (offset_b[0] != 0 or offset_b[1] != 0)
+        if has_offset:
+            for b_hash in hashes_b - common_hashes:
+                instances = entities_b.get(b_hash)
+                if not instances:
+                    continue
+                absolute_entity = instances[0][1]['absolute_entity']
+                shifted_entity = translate_absolute_entity(absolute_entity, offset_b)
+                shifted_data = diff_analyzer.create_entity_data_from_absolute(shifted_entity)
+                shifted_hash = diff_analyzer.generate_enhanced_hash(shifted_data)
+                if shifted_hash and shifted_hash in hashes_a:
+                    offset_matched_b_hashes.add(b_hash)
+                    matched_a_hashes_by_offset.add(shifted_hash)
+
+        deleted_hashes = hashes_a - common_hashes - matched_a_hashes_by_offset
+        added_hashes = hashes_b - common_hashes - offset_matched_b_hashes
 
         # エンティティ数を計算
         deleted_count = len(deleted_hashes)
         added_count = len(added_hashes)
         unchanged_count = len(common_hashes)
+        unchanged_offset_count = len(offset_matched_b_hashes)
         diff_count = deleted_count + added_count
-        total_count = deleted_count + added_count + unchanged_count
+        total_count = deleted_count + added_count + unchanged_count + unchanged_offset_count
 
         entity_counts = {
             'deleted_entities': deleted_count,
             'added_entities': added_count,
             'unchanged_entities': unchanged_count,
+            'unchanged_offset_entities': unchanged_offset_count,
             'diff_entities': diff_count,
             'total_entities': total_count
         }
 
         # 差分DXFファイル生成
         success = output_generator.create_diff_dxf(
-            entities_a, entities_b, deleted_hashes, added_hashes, common_hashes, output_file)
+            entities_a, entities_b, deleted_hashes, added_hashes, common_hashes, output_file,
+            unchanged_offset_hashes=offset_matched_b_hashes)
 
         # メモリ解放: 大きなデータ構造を削除
         del doc_a
@@ -1091,6 +1225,8 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         del deleted_hashes
         del added_hashes
         del common_hashes
+        del offset_matched_b_hashes
+        del matched_a_hashes_by_offset
         # ガベージコレクションを実行
         gc.collect()
 

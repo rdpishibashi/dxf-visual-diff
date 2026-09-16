@@ -72,8 +72,10 @@ def app():
             "",
             "**出力DXFファイルの内容：**",
             "- ADDED (デフォルト色: シアン): 比較対象ファイル(B)にのみ存在する要素",
-            "- DELETED (デフォルト色: マゼンタ): 基準ファイル(A)にのみ存在する要素", 
-            "- UNCHANGED (デフォルト色: 白/黒): 両方のファイルに存在し変更がない要素"
+            "- DELETED (デフォルト色: マゼンタ): 基準ファイル(A)にのみ存在する要素",
+            "- UNCHANGED (デフォルト色: 白/黒): 両方のファイルに存在し変更がない要素",
+            "- UNCHANGED_OFFSET (デフォルト色: 灰): オフセット補正を有効にした場合のみ生成。"
+            "補正して初めて一致した要素（比較対象ファイル(B)の座標で描画）"
         ]
         
         st.info("\n".join(help_text))
@@ -148,6 +150,7 @@ def app():
     deleted_color = diff_config.DEFAULT_DELETED_COLOR
     added_color = diff_config.DEFAULT_ADDED_COLOR
     unchanged_color = diff_config.DEFAULT_UNCHANGED_COLOR
+    unchanged_offset_color = diff_config.DEFAULT_UNCHANGED_OFFSET_COLOR
     diff_label_patterns = label_filter_config.DIFF_LABEL_PREFIX_PATTERNS
 
     with st.expander("オプション設定（config.py で変更できます）", expanded=False):
@@ -155,7 +158,8 @@ def app():
             f"座標マージン: {tolerance} ｜ "
             f"差分抽出するラベルの先頭文字列: "
             f"{'、'.join(diff_label_patterns) if diff_label_patterns else 'なし（全ラベル）'} ｜ "
-            f"レイヤー色（削除/追加/変更なし）: {deleted_color}/{added_color}/{unchanged_color}"
+            f"レイヤー色（削除/追加/変更なし/オフセット一致）: "
+            f"{deleted_color}/{added_color}/{unchanged_color}/{unchanged_offset_color}"
         )
 
     # オフセット補正設定
@@ -163,7 +167,12 @@ def app():
         st.info("""
         **オフセット補正について**
 
-        比較対象ファイル(B)に座標オフセットを適用できます。これにより、基準点の違いによる誤検知を減らすことができます。
+        比較対象ファイル(B)との一致判定に座標オフセットを適用できます。これにより、
+        基準点の違いによる誤検知を減らすことができます。
+
+        補正前から一致している要素はそのまま **UNCHANGED** に残り、補正して初めて
+        一致した要素だけが別レイヤー **UNCHANGED_OFFSET**（比較対象ファイル(B)の座標で描画）
+        に追加されます。ADDED・DELETED はオフセットを適用しない生の座標のまま出力されます。
 
         **使い方:**
         1. まず `analyze_offset.py` で2つのファイルを分析
@@ -251,6 +260,7 @@ def app():
                             deleted_color=deleted_color,
                             added_color=added_color,
                             unchanged_color=unchanged_color,
+                            unchanged_offset_color=unchanged_offset_color,
                             offset_b=offset_b
                         )
 
@@ -319,7 +329,8 @@ def app():
                     st.session_state.processing_settings = {
                         'added_color': added_color,
                         'deleted_color': deleted_color,
-                        'unchanged_color': unchanged_color
+                        'unchanged_color': unchanged_color,
+                        'unchanged_offset_color': unchanged_offset_color
                     }
                 
                 # 一時ファイルの削除
@@ -388,10 +399,18 @@ def app():
                             st.write(f"**{pair_name}**: {file_a_name} ↔ {file_b_name}")
                             # エンティティ数の表示
                             if entity_counts:
+                                # unchanged_offset_entities はオフセット補正未使用の
+                                # 旧セッション結果には存在しない可能性があるため .get() で読む
+                                unchanged_offset_entities = entity_counts.get('unchanged_offset_entities', 0)
+                                offset_caption = (
+                                    f", オフセット一致: {unchanged_offset_entities}"
+                                    if unchanged_offset_entities > 0 else ""
+                                )
                                 st.caption(
                                     f"📊 削除: {entity_counts['deleted_entities']}, "
                                     f"追加: {entity_counts['added_entities']}, "
-                                    f"変更なし: {entity_counts['unchanged_entities']}, "
+                                    f"変更なし: {entity_counts['unchanged_entities']}"
+                                    f"{offset_caption}, "
                                     f"合計: {entity_counts['total_entities']}"
                                 )
 
@@ -441,6 +460,8 @@ def app():
                 - ADDED (色{settings.get('added_color', 4)}): 比較対象ファイル(B)にのみ存在する要素
                 - DELETED (色{settings.get('deleted_color', 6)}): 基準ファイル(A)にのみ存在する要素
                 - UNCHANGED (色{settings.get('unchanged_color', 7)}): 両方のファイルに存在し変更がない要素
+                - UNCHANGED_OFFSET (色{settings.get('unchanged_offset_color', 8)}): オフセット補正で
+                  初めて一致した要素（オフセット補正を有効にしたペアのみ生成。比較対象ファイル(B)の座標で描画）
                 """)
     else:
         st.warning("少なくとも1つのファイルペア（基準DXFファイル、比較対象DXFファイル）を登録してください。")
