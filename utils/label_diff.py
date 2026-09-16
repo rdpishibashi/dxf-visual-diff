@@ -87,6 +87,7 @@ def compute_label_differences(
     validate_ref_designators: bool = False,
     ignore_moved_labels: bool = False,
     new_file_original_name: Optional[str] = None,
+    label_only: bool = False,
 ):
     """
     ラベルを抽出（ブロック展開を含む）し、変更候補・未変更候補を計算する。
@@ -94,12 +95,19 @@ def compute_label_differences(
     Args:
         ignore_moved_labels: True の場合、同一ラベルの削除件数・追加件数が一致する
             分を「移動しただけ」とみなし、座標が異なっていても変更候補から除外する
-            （reclassify_moved_labels 参照）。
+            （reclassify_moved_labels 参照）。label_only=True の場合は無視される
+            （座標を見ないラベルのみ比較は、移動の吸収を最初から内包しているため）。
         new_file_original_name: new_file のアップロード時の元ファイル名（temp_path
             ではなく図番を含む本来のファイル名）。図番の所属タイトルブロック判定
             （優先順位1: ファイル名照合）に使う。省略時はファイル名一致に頼れず、
             座標ベースのフォールバック判定になる（extract_labels.determine_drawing_number_types
             参照）。
+        label_only: True の場合、座標を一切使わずラベル文字列だけで新旧を比較する
+            （find_label_change_pairs_ignoring_coordinates 参照）。同一座標での
+            「名称変更」は検出できず、全行が追加のみ／削除のみになる。X/Y は
+            常に None（呼び出し元が Excel 出力時に空欄として扱う）。「☆」を含む
+            ラベルを常に変更候補として残す reclassify_moved_labels の例外規則も
+            働かない（座標を見ないため、そもそも「移動」という概念が発生しない）。
 
     Returns
     -------
@@ -114,15 +122,19 @@ def compute_label_differences(
     )
     labels_old, _ = _load_labels_with_cache(old_file, label_cache, filter_non_parts, False)
 
-    rounded_new = round_labels_with_coordinates(labels_new, tolerance)
-    rounded_old = round_labels_with_coordinates(labels_old, tolerance)
+    if label_only:
+        change_rows, unchanged_entries = find_label_change_pairs_ignoring_coordinates(
+            labels_new, labels_old)
+    else:
+        rounded_new = round_labels_with_coordinates(labels_new, tolerance)
+        rounded_old = round_labels_with_coordinates(labels_old, tolerance)
 
-    grouped_new = group_labels_by_coordinate(rounded_new)
-    grouped_old = group_labels_by_coordinate(rounded_old)
+        grouped_new = group_labels_by_coordinate(rounded_new)
+        grouped_old = group_labels_by_coordinate(rounded_old)
 
-    change_rows, unchanged_entries = find_label_change_pairs(grouped_new, grouped_old)
-    if ignore_moved_labels:
-        change_rows, unchanged_entries = reclassify_moved_labels(change_rows, unchanged_entries)
+        change_rows, unchanged_entries = find_label_change_pairs(grouped_new, grouped_old)
+        if ignore_moved_labels:
+            change_rows, unchanged_entries = reclassify_moved_labels(change_rows, unchanged_entries)
     change_rows.sort(key=lambda r: ((r['Old Label'] or ''), (r['New Label'] or '')))
 
     extra_info = {
@@ -188,6 +200,51 @@ def find_label_change_pairs(group_new, group_old):
                 'Old Label': None,
                 'New Label': leftover
             })
+
+    return change_rows, unchanged_entries
+
+
+def find_label_change_pairs_ignoring_coordinates(
+    labels_new: List[Tuple[str, float, float]],
+    labels_old: List[Tuple[str, float, float]],
+):
+    """座標を一切使わず、ラベル文字列だけで新旧を突き合わせる（ラベルのみ比較モード）。
+
+    `find_label_change_pairs()` が座標ごとにラベルを突き合わせるのに対し、
+    こちらは新旧それぞれの全ラベルを `Counter` で集計し、文字列単位の個数差分
+    だけを見る。座標情報が無いため、同一座標での「名称変更」ペアは原理的に
+    検出できず、差分は常に「追加のみ」（New側だけ余る）か「削除のみ」
+    （Old側だけ余る）のいずれかになる。X/Y は常に None を返す
+    （呼び出し元が Excel 出力時に空欄として扱う）。
+
+    Args:
+        labels_new: (ラベル, X, Y) のタプルのリスト（新図面）。X/Yはこの関数では
+            使わない（呼び出し元の `extract_labels()` の戻り値をそのまま渡せる）。
+        labels_old: 同上（旧図面）。
+
+    Returns:
+        tuple(list, list): (change_rows, unchanged_entries)
+            change_rows の各要素は {'X': None, 'Y': None, 'Old Label', 'New Label'}
+            のいずれか片方が None の辞書。
+            unchanged_entries は座標を持たない（'coordinate': None）。
+    """
+    counter_new = Counter(label for label, _x, _y in labels_new)
+    counter_old = Counter(label for label, _x, _y in labels_old)
+
+    change_rows = []
+    unchanged_entries = []
+
+    for label in sorted(set(counter_new) | set(counter_old)):
+        count_new = counter_new.get(label, 0)
+        count_old = counter_old.get(label, 0)
+        common = min(count_new, count_old)
+        if common > 0:
+            unchanged_entries.append({'label': label, 'count': common, 'coordinate': None})
+
+        for _ in range(count_new - common):
+            change_rows.append({'X': None, 'Y': None, 'Old Label': None, 'New Label': label})
+        for _ in range(count_old - common):
+            change_rows.append({'X': None, 'Y': None, 'Old Label': label, 'New Label': None})
 
     return change_rows, unchanged_entries
 
@@ -305,10 +362,21 @@ def build_diff_labels_workbook(
     summary_data: Optional[List[Dict]] = None,
     total_data: Optional[List[Dict]] = None,
     invalid_data: Optional[List[Dict]] = None,
+    include_ref_designator_column: bool = False,
 ) -> bytes:
     """diff_labels.xlsx のバイナリデータを生成する。
 
     シート順: Summary → Total（任意）→ ペアシート × N → Invalid（任意）
+
+    Args:
+        include_ref_designator_column: True の場合、ペアシートの先頭に
+            「機器符号候補」列（'Y' または空欄）を、Summary シートに
+            「機器符号候補数」列を追加する。値そのものは呼び出し元が
+            `sheets[*]['rows']` の各行 dict に `'機器符号候補'` キーとして、
+            `summary_data` の各行 dict に `'機器符号候補数'` キーとして
+            あらかじめ埋め込んでおく必要がある（本関数は機器符号の判定ロジック
+            自体は持たない——`label_diff.py` を DXF-visual-diff と
+            byte-identical に保つため、判定用モジュールへの依存を増やさない）。
     """
     # ペアシート名を事前決定（Summary の図番ハイパーリンクに必要）
     tmp_used: set = set()
@@ -340,8 +408,13 @@ def build_diff_labels_workbook(
 
                 ws = workbook.add_worksheet('Summary')
                 ws.freeze_panes(1, 0)
-                headers = ['図番', '流用元図番', '追加ラベル数', '削除ラベル数', '変更ラベル数', 'タイトル', 'サブタイトル']
-                col_widths = [22, 22, 14, 14, 14, 30, 30]
+                headers = ['図番', '流用元図番', '追加ラベル数', '削除ラベル数', '変更ラベル数']
+                col_widths = [22, 22, 14, 14, 14]
+                if include_ref_designator_column:
+                    headers.append('機器符号候補数')
+                    col_widths.append(14)
+                headers += ['タイトル', 'サブタイトル']
+                col_widths += [30, 30]
                 for col_idx, (h, w) in enumerate(zip(headers, col_widths)):
                     ws.write(0, col_idx, h, header_fmt)
                     ws.set_column(col_idx, col_idx, w)
@@ -354,8 +427,12 @@ def build_diff_labels_workbook(
                     ws.write(row_idx, 2, row.get('追加ラベル数', 0), num_fmt)
                     ws.write(row_idx, 3, row.get('削除ラベル数', 0), num_fmt)
                     ws.write(row_idx, 4, row.get('変更ラベル数', 0), num_fmt)
-                    ws.write(row_idx, 5, row.get('タイトル') or '')
-                    ws.write(row_idx, 6, row.get('サブタイトル') or '')
+                    col_idx = 5
+                    if include_ref_designator_column:
+                        ws.write(row_idx, col_idx, row.get('機器符号候補数', 0), num_fmt)
+                        col_idx += 1
+                    ws.write(row_idx, col_idx, row.get('タイトル') or '')
+                    ws.write(row_idx, col_idx + 1, row.get('サブタイトル') or '')
 
             # ── Total シート ──
             if total_data is not None:
@@ -364,9 +441,11 @@ def build_diff_labels_workbook(
                 format_sheet(writer, 'Total', total_df)
 
             # ── ペアシート ──
+            pair_columns = (['機器符号候補'] if include_ref_designator_column else []) + \
+                ['X', 'Y', 'Old Label', 'New Label']
             for sheet, sheet_name in zip(sheets, pair_sheet_names):
                 rows = sheet.get('rows') or []
-                df = pd.DataFrame(rows, columns=['X', 'Y', 'Old Label', 'New Label'])
+                df = pd.DataFrame(rows, columns=pair_columns)
                 old_col = sheet.get('old_label_name', 'Old Label')
                 new_col = sheet.get('new_label_name', 'New Label')
                 df.rename(columns={'Old Label': old_col, 'New Label': new_col}, inplace=True)
