@@ -36,10 +36,11 @@ class DiffConfig:
     DEFAULT_TOLERANCE = 0.05
 
     # レイヤー色設定（AutoCADカラーインデックス）
-    #   1=赤 / 2=黄 / 3=緑 / 4=シアン / 5=青 / 6=マゼンタ / 7=白・黒
+    #   1=赤 / 2=黄 / 3=緑 / 4=シアン / 5=青 / 6=マゼンタ / 7=白・黒 / 8=灰 / 9=明灰
     DEFAULT_DELETED_COLOR = 6      # 削除図形（基準ファイルAのみに存在）
     DEFAULT_ADDED_COLOR = 4        # 追加図形（比較対象ファイルBのみに存在）
     DEFAULT_UNCHANGED_COLOR = 7    # 変更なし図形
+    DEFAULT_UNCHANGED_OFFSET_COLOR = 8  # オフセット補正で一致した図形（B側の座標で描画）
 
 
 class LabelFilterConfig:
