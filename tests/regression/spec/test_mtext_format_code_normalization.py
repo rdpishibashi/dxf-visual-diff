@@ -167,9 +167,10 @@ def test_output_dxf_preserves_original_format_codes():
 
         assert counts['unchanged_entities'] == 1
         unchanged_mtexts = [e for e in doc.modelspace().query('MTEXT')
-                             if e.dxf.layer == 'UNCHANGED']
+                             if e.dxf.layer == 'A_UNCHANGED']
         assert len(unchanged_mtexts) == 1
-        # UNCHANGEDはA側の代表インスタンスから描画される（create_diff_dxf の仕様）。
+        # A_UNCHANGEDはA側の実体から描画される（create_diff_dxf の仕様、
+        # 2026-09-18の6レイヤー化後も同じ）。
         # 出力された生テキストが、正規化前のAの元の書式コードと完全一致することを確認する
         assert unchanged_mtexts[0].dxf.text == original_a, \
             "出力DXFのMTEXTが正規化後のプレーンテキストになっている（描画データが" \

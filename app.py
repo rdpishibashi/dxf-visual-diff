@@ -71,13 +71,18 @@ def app():
             "2. 必要に応じてオプション設定を調整します",
             "3. 「DXF差分を比較」ボタンをクリックして処理を実行します",
             "",
-            "**出力DXFファイルの内容：**",
-            "- ADDED (デフォルト色: シアン): 比較対象ファイル(B)にのみ存在する要素",
-            "- DELETED (デフォルト色: マゼンタ): 基準ファイル(A)にのみ存在する要素",
-            "- UNCHANGED (デフォルト色: 白/黒): 両方のファイルに存在し変更がない要素",
-            "- UNCHANGED_OFFSET (デフォルト色: 灰): 一部の図形だけが平行移動している場合に、"
-            "その移動量（オフセット）を自動検出して一致とみなした要素"
-            "（比較対象ファイル(B)の座標で描画。検出されたオフセットは結果画面に一覧表示されます）"
+            "**出力DXFファイルの内容（6レイヤー構成）：**",
+            "「A_」で始まるレイヤーだけを表示すると基準ファイル(A)の図面が、"
+            "「B_」で始まるレイヤーだけを表示すると比較対象ファイル(B)の図面が、"
+            "それぞれ変更箇所の色分けつきで再現されます。",
+            "- A_DELETED (デフォルト色: マゼンタ): 基準ファイル(A)にのみ存在する要素",
+            "- B_ADDED (デフォルト色: シアン): 比較対象ファイル(B)にのみ存在する要素",
+            "- A_UNCHANGED / B_UNCHANGED (デフォルト色: 白/黒): 両方のファイルに存在し"
+            "変更がない要素（同一座標。由来のファイルだけがA/Bで異なります）",
+            "- A_UNCHANGED_OFFSET (デフォルト色: 濃灰) / B_UNCHANGED_OFFSET (デフォルト色: 明灰): "
+            "一部の図形だけが平行移動している場合に、その移動量（オフセット）を自動検出して"
+            "一致とみなした要素（それぞれ基準ファイル(A)・比較対象ファイル(B)の座標で描画。"
+            "検出されたオフセットは結果画面に一覧表示されます）"
         ]
         
         st.info("\n".join(help_text))
@@ -152,7 +157,8 @@ def app():
     deleted_color = diff_config.DEFAULT_DELETED_COLOR
     added_color = diff_config.DEFAULT_ADDED_COLOR
     unchanged_color = diff_config.DEFAULT_UNCHANGED_COLOR
-    unchanged_offset_color = diff_config.DEFAULT_UNCHANGED_OFFSET_COLOR
+    unchanged_offset_a_color = diff_config.DEFAULT_UNCHANGED_OFFSET_A_COLOR
+    unchanged_offset_b_color = diff_config.DEFAULT_UNCHANGED_OFFSET_B_COLOR
     diff_label_patterns = label_filter_config.DIFF_LABEL_PREFIX_PATTERNS
 
     # オフセット補正の自動検出設定（2026-09-17新設。手動の「オフセット補正設定」UIは廃止）
@@ -174,8 +180,9 @@ def app():
             f"座標マージン: {tolerance} ｜ "
             f"差分抽出するラベルの先頭文字列: "
             f"{'、'.join(diff_label_patterns) if diff_label_patterns else 'なし（全ラベル）'} ｜ "
-            f"レイヤー色（削除/追加/変更なし/オフセット一致）: "
-            f"{deleted_color}/{added_color}/{unchanged_color}/{unchanged_offset_color}"
+            f"レイヤー色（削除/追加/変更なし/オフセット一致A側/オフセット一致B側）: "
+            f"{deleted_color}/{added_color}/{unchanged_color}/"
+            f"{unchanged_offset_a_color}/{unchanged_offset_b_color}"
         )
         if offset_detection:
             st.caption(
@@ -190,9 +197,10 @@ def app():
             st.info(
                 "**オフセット補正の自動検出について**\n\n"
                 "一部の回路ブロックだけが平行移動している場合、その移動量（オフセット）を"
-                "自動的に検出し、UNCHANGED_OFFSET レイヤーとして一致扱いにします。"
-                "補正前から一致している要素はそのまま UNCHANGED に残り、"
-                "ADDED・DELETED は常にオフセットを適用しない生の座標のまま出力されます。\n\n"
+                "自動的に検出し、A_UNCHANGED_OFFSET（A座標）・B_UNCHANGED_OFFSET（B座標）"
+                "レイヤーとして一致扱いにします。"
+                "補正前から一致している要素はそのまま A_UNCHANGED/B_UNCHANGED に残り、"
+                "A_DELETED・B_ADDED は常にオフセットを適用しない生の座標のまま出力されます。\n\n"
                 "一致件数が少ない移動（記号1個分など）でも、一致した図形が狭い範囲に"
                 "まとまっていれば「コンパクト救済」として採用されます（散在した偶然の"
                 "一致は除外されます）。検出されたオフセットの一覧は比較実行後の結果画面に"
@@ -233,7 +241,8 @@ def app():
                             deleted_color=deleted_color,
                             added_color=added_color,
                             unchanged_color=unchanged_color,
-                            unchanged_offset_color=unchanged_offset_color,
+                            unchanged_offset_a_color=unchanged_offset_a_color,
+                            unchanged_offset_b_color=unchanged_offset_b_color,
                             offset_detection=offset_detection
                         )
 
@@ -303,7 +312,8 @@ def app():
                         'added_color': added_color,
                         'deleted_color': deleted_color,
                         'unchanged_color': unchanged_color,
-                        'unchanged_offset_color': unchanged_offset_color
+                        'unchanged_offset_a_color': unchanged_offset_a_color,
+                        'unchanged_offset_b_color': unchanged_offset_b_color
                     }
                 
                 # 一時ファイルの削除
@@ -370,21 +380,26 @@ def app():
 
                         with col1:
                             st.write(f"**{pair_name}**: {file_a_name} ↔ {file_b_name}")
-                            # エンティティ数の表示
+                            # エンティティ数の表示（2026-09-18、A側/B側で分けて表示。
+                            # unchanged_offset_a_entities/total_a_entities はオフセット
+                            # 補正未使用・6レイヤー化前の旧セッション結果には存在しない
+                            # 可能性があるため .get() で読む）
                             if entity_counts:
-                                # unchanged_offset_entities はオフセット補正未使用の
-                                # 旧セッション結果には存在しない可能性があるため .get() で読む
-                                unchanged_offset_entities = entity_counts.get('unchanged_offset_entities', 0)
-                                offset_caption = (
-                                    f", オフセット一致: {unchanged_offset_entities}"
-                                    if unchanged_offset_entities > 0 else ""
+                                unchanged_offset_b = entity_counts.get('unchanged_offset_entities', 0)
+                                unchanged_offset_a = entity_counts.get('unchanged_offset_a_entities', 0)
+                                offset_a_caption = f" / オフセット一致 {unchanged_offset_a}" if unchanged_offset_a > 0 else ""
+                                offset_b_caption = f" / オフセット一致 {unchanged_offset_b}" if unchanged_offset_b > 0 else ""
+                                total_a = entity_counts.get('total_a_entities')
+                                total_a_caption = f"（計 {total_a}）" if total_a is not None else ""
+                                st.caption(
+                                    f"📊 A側: 削除 {entity_counts['deleted_entities']} / "
+                                    f"変更なし {entity_counts['unchanged_entities']}"
+                                    f"{offset_a_caption}{total_a_caption}"
                                 )
                                 st.caption(
-                                    f"📊 削除: {entity_counts['deleted_entities']}, "
-                                    f"追加: {entity_counts['added_entities']}, "
-                                    f"変更なし: {entity_counts['unchanged_entities']}"
-                                    f"{offset_caption}, "
-                                    f"合計: {entity_counts['total_entities']}"
+                                    f"　B側: 追加 {entity_counts['added_entities']} / "
+                                    f"変更なし {entity_counts['unchanged_entities']}"
+                                    f"{offset_b_caption}（計 {entity_counts['total_entities']}）"
                                 )
 
                         with col2:
@@ -448,14 +463,20 @@ def app():
             
             # オプション設定の情報を表示
             if settings:
+                offset_a_color = settings.get('unchanged_offset_a_color', 8)
+                offset_b_color = settings.get('unchanged_offset_b_color', 9)
                 st.info(f"""
-                生成されたDXFファイルでは、以下のレイヤーで差分が表示されます：
-                - ADDED (色{settings.get('added_color', 4)}): 比較対象ファイル(B)にのみ存在する要素
-                - DELETED (色{settings.get('deleted_color', 6)}): 基準ファイル(A)にのみ存在する要素
-                - UNCHANGED (色{settings.get('unchanged_color', 7)}): 両方のファイルに存在し変更がない要素
-                - UNCHANGED_OFFSET (色{settings.get('unchanged_offset_color', 8)}): 自動検出された
-                  オフセットで一致した要素（検出0件のペアでは生成されません。比較対象ファイル(B)の座標で描画。
-                  検出内容は各ペアの「🔍 検出されたオフセット」から確認できます）
+                生成されたDXFファイルは6レイヤー構成です。「A_」で始まるレイヤーだけを表示すると
+                基準ファイル(A)の図面が、「B_」で始まるレイヤーだけを表示すると比較対象ファイル(B)の
+                図面が、それぞれ変更箇所の色分けつきで再現されます：
+                - A_DELETED (色{settings.get('deleted_color', 6)}): 基準ファイル(A)にのみ存在する要素
+                - B_ADDED (色{settings.get('added_color', 4)}): 比較対象ファイル(B)にのみ存在する要素
+                - A_UNCHANGED / B_UNCHANGED (色{settings.get('unchanged_color', 7)}): 両方のファイルに
+                  存在し変更がない要素（同一座標）
+                - A_UNCHANGED_OFFSET (色{offset_a_color}) / B_UNCHANGED_OFFSET (色{offset_b_color}):
+                  自動検出されたオフセットで一致した要素（検出0件のペアでは生成されません。それぞれ
+                  基準ファイル(A)・比較対象ファイル(B)の座標で描画。検出内容は各ペアの
+                  「🔍 検出されたオフセット」から確認できます）
                 """)
     else:
         st.warning("少なくとも1つのファイルペア（基準DXFファイル、比較対象DXFファイル）を登録してください。")

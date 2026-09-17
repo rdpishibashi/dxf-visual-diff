@@ -1,16 +1,24 @@
 """
 このテストが守るもの: compare_dxf_files_and_generate_dxf() のオフセット補正
 （offset_b）が「和集合型」（補正なしで一致した要素は UNCHANGED のまま残り、
-補正して初めて一致した要素だけが別レイヤー UNCHANGED_OFFSET に追加される）
-であること。2026-09-16 のユーザー要求「A, B が一致した図形要素も（座標は
-一致しないが）UNCHANGED に加えて表示したい」に対応する。
+補正して初めて一致した要素だけが別レイヤーに追加される）であること。
+2026-09-16 のユーザー要求「A, B が一致した図形要素も（座標は一致しないが）
+UNCHANGED に加えて表示したい」に対応する。
+
+2026-09-18、出力を6レイヤー構成（A_*/B_* 接頭辞）に変更したことに伴い、
+レイヤー名の期待値を更新した（`A_DELETED`/`B_ADDED`/`A_UNCHANGED`/
+`B_UNCHANGED`/`A_UNCHANGED_OFFSET`/`B_UNCHANGED_OFFSET`）。
+オフセット一致は今や A_UNCHANGED_OFFSET（A座標）・B_UNCHANGED_OFFSET（B座標）
+の**両方**に描かれる（旧テストは「A側旧位置には描かれない」ことを検証していたが、
+それは旧・単一レイヤー仕様の話であり、6レイヤー化後は仕様が変わっている）。
 
 対応する受入条件（ユーザー承認済み・引き継ぎ書 HANDOVER_offset_union_unchanged.md
-第3章「確定した設計判断」より）:
-    1. オフセット一致分は UNCHANGED に合流させず、別レイヤー UNCHANGED_OFFSET
-       （既定色8=灰）に分ける。
-    2. UNCHANGED_OFFSET は B（新）の座標に描く（A の旧位置には描かない）。
-    3. オフセット有効時の ADDED は B の生の座標のまま（従来の B+offset から変更）。
+第3章「確定した設計判断」、および HANDOVER_six_layer_ab_split.md より）:
+    1. オフセット一致分は UNCHANGED に合流させず、別レイヤー
+       A_UNCHANGED_OFFSET/B_UNCHANGED_OFFSET（既定色8=濃灰/9=明灰）に分ける。
+    2. A_UNCHANGED_OFFSET は A（旧）の座標に、B_UNCHANGED_OFFSET は B（新）の
+       座標に描く。
+    3. オフセット有効時の B_ADDED は B の生の座標のまま（従来の B+offset から変更）。
     4. 和集合は offset_b が有効なときの唯一の挙動（旧・置き換え型のモードは残さない）。
 
 以前どう壊れていたか（旧・置き換え型の問題）:
@@ -108,60 +116,69 @@ def _run_compare(path_a, path_b, tmpdir, offset_b, suffix=""):
 
 
 def test_exact_match_stays_unchanged_with_offset():
-    """完全一致の要素は、オフセット有効時でも UNCHANGED に残る
-    （旧・置き換え型ではDELETED+ADDEDに転落していたケース）"""
+    """完全一致の要素は、オフセット有効時でも A_UNCHANGED/B_UNCHANGED に残る
+    （旧・置き換え型ではDELETED+ADDEDに転落していたケース）。
+    A_UNCHANGED は entities_a、B_UNCHANGED は entities_b の実体から描画される
+    （6レイヤー化、2026-09-18）ため、両方に同じ座標で存在することを確認する"""
     with tempfile.TemporaryDirectory() as d:
         path_a, path_b = _build_pair(*OFFSET, tmpdir=d)
         doc, entity_counts = _run_compare(path_a, path_b, d, OFFSET)
 
-        unchanged_starts = _line_starts(doc, 'UNCHANGED')
-        assert (0.0, 0.0) in unchanged_starts, \
-            "完全一致のLINEがUNCHANGEDレイヤーに存在しない"
+        a_unchanged_starts = _line_starts(doc, 'A_UNCHANGED')
+        b_unchanged_starts = _line_starts(doc, 'B_UNCHANGED')
+        assert (0.0, 0.0) in a_unchanged_starts, \
+            "完全一致のLINEがA_UNCHANGEDレイヤーに存在しない"
+        assert (0.0, 0.0) in b_unchanged_starts, \
+            "完全一致のLINEがB_UNCHANGEDレイヤーに存在しない"
         assert entity_counts['unchanged_entities'] >= 1
 
 
 def test_offset_matched_goes_to_unchanged_offset_layer():
-    """オフセット補正で初めて一致した要素は UNCHANGED_OFFSET レイヤーに、
-    B（新）の座標で描画される"""
+    """オフセット補正で初めて一致した要素は、A_UNCHANGED_OFFSET に A（旧）の
+    座標で、B_UNCHANGED_OFFSET に B（新）の座標で、それぞれ描画される
+    （6レイヤー化、2026-09-18。旧仕様はB座標のみの単一レイヤーだった）"""
     with tempfile.TemporaryDirectory() as d:
         path_a, path_b = _build_pair(*OFFSET, tmpdir=d)
         doc, entity_counts = _run_compare(path_a, path_b, d, OFFSET)
 
-        assert 'UNCHANGED_OFFSET' in doc.layers, \
-            "UNCHANGED_OFFSETレイヤーが作成されていない"
+        assert 'A_UNCHANGED_OFFSET' in doc.layers, \
+            "A_UNCHANGED_OFFSETレイヤーが作成されていない"
+        assert 'B_UNCHANGED_OFFSET' in doc.layers, \
+            "B_UNCHANGED_OFFSETレイヤーが作成されていない"
 
-        offset_starts = _line_starts(doc, 'UNCHANGED_OFFSET')
+        a_offset_starts = _line_starts(doc, 'A_UNCHANGED_OFFSET')
+        b_offset_starts = _line_starts(doc, 'B_UNCHANGED_OFFSET')
         dx, dy = OFFSET
-        assert (100.0 - dx, 100.0 - dy) in offset_starts, \
-            "オフセット一致したLINEがB（新）の座標で描画されていない"
-        # A側の旧位置には描かれていないこと
-        assert (100.0, 100.0) not in offset_starts, \
-            "オフセット一致したLINEがA（旧）の座標で描かれてしまっている"
+        assert (100.0, 100.0) in a_offset_starts, \
+            "オフセット一致したLINEがA（旧）の座標でA_UNCHANGED_OFFSETに描画されていない"
+        assert (100.0 - dx, 100.0 - dy) in b_offset_starts, \
+            "オフセット一致したLINEがB（新）の座標でB_UNCHANGED_OFFSETに描画されていない"
 
         assert entity_counts['unchanged_offset_entities'] == 1
+        assert entity_counts['unchanged_offset_a_entities'] == 1
 
 
 def test_added_uses_raw_b_coordinates():
-    """Bのみに存在する要素は、オフセット有効時でもBの生座標のままADDEDに入る
+    """Bのみに存在する要素は、オフセット有効時でもBの生座標のままB_ADDEDに入る
     （従来の B+offset から変更）"""
     with tempfile.TemporaryDirectory() as d:
         path_a, path_b = _build_pair(*OFFSET, tmpdir=d)
         doc, entity_counts = _run_compare(path_a, path_b, d, OFFSET)
 
-        added_starts = _line_starts(doc, 'ADDED')
+        added_starts = _line_starts(doc, 'B_ADDED')
         assert (300.0, 300.0) in added_starts, \
-            "ADDEDのLINEがB生座標で描画されていない（誤ってオフセット適用されている可能性）"
+            "B_ADDEDのLINEがB生座標で描画されていない（誤ってオフセット適用されている可能性）"
         dx, dy = OFFSET
         assert (300.0 + dx, 300.0 + dy) not in added_starts
 
 
 def test_deleted_uses_a_coordinates():
-    """Aのみに存在する要素は、オフセット有効時でもAの座標のままDELETEDに入る"""
+    """Aのみに存在する要素は、オフセット有効時でもAの座標のままA_DELETEDに入る"""
     with tempfile.TemporaryDirectory() as d:
         path_a, path_b = _build_pair(*OFFSET, tmpdir=d)
         doc, entity_counts = _run_compare(path_a, path_b, d, OFFSET)
 
-        deleted_starts = _line_starts(doc, 'DELETED')
+        deleted_starts = _line_starts(doc, 'A_DELETED')
         assert (200.0, 200.0) in deleted_starts
 
 
@@ -175,19 +192,23 @@ def test_zero_offset_equals_no_offset():
         doc_zero, counts_zero = _run_compare(path_a, path_b, d, (0.0, 0.0), suffix="_zero")
 
         assert counts_none == counts_zero
-        assert 'UNCHANGED_OFFSET' not in doc_none.layers
-        assert 'UNCHANGED_OFFSET' not in doc_zero.layers
+        assert 'A_UNCHANGED_OFFSET' not in doc_none.layers
+        assert 'B_UNCHANGED_OFFSET' not in doc_none.layers
+        assert 'A_UNCHANGED_OFFSET' not in doc_zero.layers
+        assert 'B_UNCHANGED_OFFSET' not in doc_zero.layers
 
 
 def test_no_offset_layer_when_disabled():
-    """オフセット無効時（offset_b=None）にUNCHANGED_OFFSETレイヤーが作られない
-    （空レイヤーでファイルを汚さない）"""
+    """オフセット無効時（offset_b=None）にA_UNCHANGED_OFFSET/B_UNCHANGED_OFFSET
+    レイヤーが（両方とも）作られない（空レイヤーでファイルを汚さない）"""
     with tempfile.TemporaryDirectory() as d:
         path_a, path_b = _build_pair(*OFFSET, tmpdir=d)
         doc, entity_counts = _run_compare(path_a, path_b, d, None)
 
-        assert 'UNCHANGED_OFFSET' not in doc.layers
+        assert 'A_UNCHANGED_OFFSET' not in doc.layers
+        assert 'B_UNCHANGED_OFFSET' not in doc.layers
         assert entity_counts['unchanged_offset_entities'] == 0
+        assert entity_counts['unchanged_offset_a_entities'] == 0
         # オフセット無効時、OFFSET_ONLYペアはDELETED+ADDEDとして残る
         assert entity_counts['deleted_entities'] >= 2  # A_ONLY + OFFSET_ONLY(A側)
         assert entity_counts['added_entities'] >= 2     # B_ONLY + OFFSET_ONLY(B側)
@@ -236,7 +257,9 @@ def test_translate_absolute_entity_matches_expander_global_offset():
 
 
 def test_entity_counts_sum():
-    """total_entities = deleted + added + unchanged + unchanged_offset"""
+    """total_entities = deleted + added + unchanged + unchanged_offset（B側合計）。
+    total_a_entities = deleted + unchanged + unchanged_offset_a（A側合計、
+    2026-09-18新設）も同時に検証する"""
     with tempfile.TemporaryDirectory() as d:
         path_a, path_b = _build_pair(*OFFSET, tmpdir=d)
 
@@ -246,6 +269,10 @@ def test_entity_counts_sum():
                     + counts_with_offset['unchanged_entities']
                     + counts_with_offset['unchanged_offset_entities'])
         assert counts_with_offset['total_entities'] == expected
+        expected_a = (counts_with_offset['deleted_entities']
+                      + counts_with_offset['unchanged_entities']
+                      + counts_with_offset['unchanged_offset_a_entities'])
+        assert counts_with_offset['total_a_entities'] == expected_a
 
         _, counts_no_offset = _run_compare(path_a, path_b, d, None, suffix="_no")
         expected_no = (counts_no_offset['deleted_entities']
@@ -253,6 +280,10 @@ def test_entity_counts_sum():
                        + counts_no_offset['unchanged_entities']
                        + counts_no_offset['unchanged_offset_entities'])
         assert counts_no_offset['total_entities'] == expected_no
+        expected_a_no = (counts_no_offset['deleted_entities']
+                          + counts_no_offset['unchanged_entities']
+                          + counts_no_offset['unchanged_offset_a_entities'])
+        assert counts_no_offset['total_a_entities'] == expected_a_no
 
 
 def test_exact_match_not_double_counted_in_offset_pass():
@@ -273,11 +304,13 @@ def test_exact_match_not_double_counted_in_offset_pass():
 
         assert entity_counts['unchanged_entities'] == 1
         assert entity_counts['unchanged_offset_entities'] == 0
+        assert entity_counts['unchanged_offset_a_entities'] == 0
         assert entity_counts['deleted_entities'] == 0
         assert entity_counts['added_entities'] == 0
 
-        # UNCHANGED_OFFSETレイヤーは（一致対象が無いため）作られない
-        assert 'UNCHANGED_OFFSET' not in doc.layers
+        # A_UNCHANGED_OFFSET/B_UNCHANGED_OFFSETレイヤーは（一致対象が無いため）作られない
+        assert 'A_UNCHANGED_OFFSET' not in doc.layers
+        assert 'B_UNCHANGED_OFFSET' not in doc.layers
 
 
 if __name__ == '__main__':
