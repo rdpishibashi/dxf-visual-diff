@@ -16,13 +16,18 @@
 2. 同じ形状キーを持つA×Bの全ペアについて、アンカー座標の差分（＝移動量）を
    オフセット候補として得票させる
 3. 得票上位の候補について、実際に一致する図形の集合を求める
-4. 一致件数の多い候補から貪欲に採用する。採用条件は
-   「一致件数がしきい値以上」かつ「一致した図形の形状の種類数がしきい値以上」
-   （後者は、罫線等の等間隔繰り返し形状が1ピッチずれて偶然一致する偽陽性を防ぐガード）
+4. 一致件数の多い候補から貪欲に採用する。採用条件は次の**どちらか**を満たすこと:
+   - ① 一致件数がしきい値以上 かつ 一致した図形の形状の種類数がしきい値以上
+     （後者は、罫線等の等間隔繰り返し形状が1ピッチずれて偶然一致する偽陽性を防ぐガード）
+   - ② コンパクト救済（2026-09-17新設）: ①より緩い一致件数・形状種類数の条件に加え、
+     一致した図形群の「広がり」（アンカー座標のバウンディングボックス対角長）が
+     しきい値以下であること。記号1個分の小さな移動は一致件数が少なくなりがちだが、
+     狭い範囲にまとまって動くため、この条件で本物の移動と偶然の一致を区別する
 """
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from collections import defaultdict
+import math
 
 # アンカー座標として使う座標属性（この順に最初に見つかったものを使う）。
 # compare_dxf.py の SignatureGenerator.create_absolute_entity_signature() が
@@ -35,9 +40,14 @@ class OffsetDetectionConfig:
     """オフセット自動検出のしきい値設定"""
     min_matches: int = 10
     min_distinct_shapes: int = 5
-    max_offsets: int = 20
-    max_candidates: int = 50
+    max_offsets: int = 50
+    max_candidates: int = 100
     max_instances_per_shape: int = 8
+    # コンパクト救済（2026-09-17新設）: ①(min_matches/min_distinct_shapes)より
+    # 緩い条件に加え、一致した図形群の広がりが compact_max_span 以下であれば採用する
+    compact_min_matches: int = 4
+    compact_min_distinct_shapes: int = 2
+    compact_max_span: float = 15.0
 
 
 @dataclass
@@ -47,6 +57,8 @@ class DetectedOffset:
     matched_b_hashes: Set[str] = field(default_factory=set)
     matched_a_hashes: Set[str] = field(default_factory=set)
     distinct_shapes: int = 0
+    span: float = 0.0
+    compact: bool = False
 
 
 def entity_anchor(absolute_entity: Dict) -> Optional[Tuple[float, float]]:
@@ -66,6 +78,27 @@ def entity_anchor(absolute_entity: Dict) -> Optional[Tuple[float, float]]:
         v = vertices[0]
         return (float(v[0]), float(v[1]))
     return None
+
+
+def _matched_span(matched_b_hashes: Set[str], entities_b: Dict) -> float:
+    """一致したB側エンティティのアンカー座標のバウンディングボックス対角長を返す。
+
+    「記号1個分の移動」か「散在した偶然の一致」かを区別するコンパクト救済の判定に使う。
+    アンカーが取れるエンティティが2個未満の場合は 0.0 を返す。
+    """
+    points = []
+    for b_hash in matched_b_hashes:
+        instances = entities_b.get(b_hash)
+        if not instances:
+            continue
+        anchor = entity_anchor(instances[0][1]['absolute_entity'])
+        if anchor is not None:
+            points.append(anchor)
+    if len(points) < 2:
+        return 0.0
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return math.hypot(max(xs) - min(xs), max(ys) - min(ys))
 
 
 def _build_shape_index(hashes: Set[str], entities: Dict, translate_fn: Callable,
@@ -144,8 +177,8 @@ def detect_offsets(entities_a: Dict, entities_b: Dict,
         config: しきい値設定
 
     Returns:
-        (採用されたDetectedOffsetのリスト（一致件数降順）, しきい値未満で
-         不採用になった候補数)
+        (採用されたDetectedOffsetのリスト（一致件数降順）, どちらの採用条件も
+         満たさず不採用になった候補数)
     """
     idx_a, _ = _build_shape_index(unmatched_a_hashes, entities_a, translate_fn, signature_fn)
     idx_b, shape_key_of_b = _build_shape_index(unmatched_b_hashes, entities_b, translate_fn, signature_fn)
@@ -201,12 +234,25 @@ def detect_offsets(entities_a: Dict, entities_b: Dict,
         matched_a = {ah for _, ah in hit_pairs}
         distinct_shapes = len({shape_key_of_b[bh] for bh in matched_b if bh in shape_key_of_b})
 
-        if len(matched_b) >= config.min_matches and distinct_shapes >= config.min_distinct_shapes:
+        # 採用条件①: 一致件数・形状種類数がともにしきい値以上（本来の条件）
+        meets_standard = (len(matched_b) >= config.min_matches
+                           and distinct_shapes >= config.min_distinct_shapes)
+        # 採用条件②: コンパクト救済。①より緩い件数・形状種類数の条件に加え、
+        # 一致した図形群が狭い範囲（compact_max_span以下）にまとまっていること
+        span = _matched_span(matched_b, entities_b)
+        meets_compact = (not meets_standard
+                          and len(matched_b) >= config.compact_min_matches
+                          and distinct_shapes >= config.compact_min_distinct_shapes
+                          and span <= config.compact_max_span)
+
+        if meets_standard or meets_compact:
             adopted.append(DetectedOffset(
                 offset=offset,
                 matched_b_hashes=matched_b,
                 matched_a_hashes=matched_a,
                 distinct_shapes=distinct_shapes,
+                span=span,
+                compact=meets_compact,
             ))
             remaining_b -= matched_b
         else:

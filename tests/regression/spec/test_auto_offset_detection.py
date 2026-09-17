@@ -18,6 +18,11 @@
        （形状多様性ガードは、等間隔に並ぶ同一形状が1ピッチずれて偶然一致する
        偽陽性を排除するため。実データで `(0.0,15.0)` 27件/形状1種類等が
        37個見つかったことに基づく）
+    4. コンパクト救済（2026-09-17追加）: 3の条件を満たさない少数の一致でも、
+       一致した図形群が狭い範囲（広がり）にまとまっていれば採用する第2経路。
+       記号1個分の小さな移動（一致件数が少ない）と、散在した偶然の一致を
+       「広がり」で区別する。ユーザーが具体的なエンティティハンドル付きで
+       報告した実例（EE3294-039-03B vs EE4153-039-03A）に基づく
     5. offset_b（明示指定）は残る。offset_detection と併用可能（和集合）
 
 以前どう壊れていたか（この機能追加前）:
@@ -74,7 +79,8 @@ def _run_compare(path_a, path_b, tmpdir, offset_detection, suffix=""):
 
 def _default_config(**overrides):
     cfg = dict(min_matches=10, min_distinct_shapes=5, max_offsets=20,
-               max_candidates=50, max_instances_per_shape=8)
+               max_candidates=50, max_instances_per_shape=8,
+               compact_min_matches=4, compact_min_distinct_shapes=2, compact_max_span=15.0)
     cfg.update(overrides)
     return OffsetDetectionConfig(**cfg)
 
@@ -91,13 +97,23 @@ def _save_pair(build_a, build_b, tmpdir, name='pair'):
     return path_a, path_b
 
 
-def _distinct_circles(msp, count, base_x, base_y, dx=0.0, dy=0.0, radius_start=1.0):
-    """半径の異なる（＝形状が異なる）CIRCLEをcount個、等間隔に配置する。
-    (dx, dy) は全体に加算するオフセット（B側を作る際に使う）。"""
+def _distinct_circles(msp, count, base_x, base_y, dx=0.0, dy=0.0, radius_start=1.0, spacing=20.0):
+    """半径の異なる（＝形状が異なる）CIRCLEをcount個、spacing間隔で配置する。
+    (dx, dy) は全体に加算するオフセット（B側を作る際に使う）。
+    spacing を小さくすると「コンパクトな」（広がりの小さい）グループになる。"""
     for i in range(count):
-        cx = base_x + i * 20.0 + dx
+        cx = base_x + i * spacing + dx
         cy = base_y + dy
         radius = radius_start + i  # 半径を変えて形状キーを全て異ならせる
+        msp.add_circle(center=(cx, cy), radius=radius, dxfattribs={'layer': '0'})
+
+
+def _same_shape_circles(msp, count, base_x, base_y, dx=0.0, dy=0.0, radius=3.0, spacing=2.0):
+    """同一半径（＝形状が同じ）CIRCLEをcount個、spacing間隔で配置する。
+    形状多様性ガードのテストに使う。"""
+    for i in range(count):
+        cx = base_x + i * spacing + dx
+        cy = base_y + dy
         msp.add_circle(center=(cx, cy), radius=radius, dxfattribs={'layer': '0'})
 
 
@@ -339,6 +355,141 @@ def test_detection_disabled_matches_baseline():
         assert counts['detected_offsets'] == []
         assert counts['rejected_offset_candidates'] == 0
         assert 'UNCHANGED_OFFSET' not in doc.layers
+
+
+def test_compact_small_group_is_rescued():
+    """異なる形状5個を狭い範囲（間隔2.0＝広がり約8）に配置し同一デルタで移動
+    → 一致件数(5)はしきい値10未満だが、コンパクト救済（採用条件②）で採用され、
+    detected_offsets[0]['compact'] が True になる"""
+    with tempfile.TemporaryDirectory() as d:
+        delta = (50.0, 30.0)
+
+        def build_a(msp):
+            _distinct_circles(msp, 5, base_x=0, base_y=0, spacing=2.0)
+
+        def build_b(msp):
+            _distinct_circles(msp, 5, base_x=0, base_y=0, dx=-delta[0], dy=-delta[1], spacing=2.0)
+
+        path_a, path_b = _save_pair(build_a, build_b, d)
+        cfg = _default_config()  # min_matches=10（①では不成立）、compact既定4/2/15.0
+        doc, counts = _run_compare(path_a, path_b, d, cfg)
+
+        assert counts['unchanged_offset_entities'] == 5
+        assert counts['deleted_entities'] == 0
+        assert counts['added_entities'] == 0
+        assert len(counts['detected_offsets']) == 1
+        detected = counts['detected_offsets'][0]
+        assert detected['offset'] == delta
+        assert detected['matches'] == 5
+        assert detected['compact'] is True
+        assert detected['span'] <= cfg.compact_max_span
+
+
+def test_scattered_small_group_is_not_rescued():
+    """異なる形状5個を広く散在させて（既定間隔20.0＝広がり約80）同一デルタで
+    移動 → 一致件数はコンパクト救済の最小件数(4)を満たすが、広がりが上限(15)を
+    超えるため不採用のまま（DELETED+ADDED）"""
+    with tempfile.TemporaryDirectory() as d:
+        delta = (50.0, 30.0)
+
+        def build_a(msp):
+            _distinct_circles(msp, 5, base_x=0, base_y=0)  # spacing既定20.0
+
+        def build_b(msp):
+            _distinct_circles(msp, 5, base_x=0, base_y=0, dx=-delta[0], dy=-delta[1])
+
+        path_a, path_b = _save_pair(build_a, build_b, d)
+        cfg = _default_config()
+        doc, counts = _run_compare(path_a, path_b, d, cfg)
+
+        assert counts['unchanged_offset_entities'] == 0
+        assert counts['deleted_entities'] == 5
+        assert counts['added_entities'] == 5
+        assert counts['detected_offsets'] == []
+        assert counts['rejected_offset_candidates'] >= 1
+
+
+def test_compact_rescue_requires_shape_diversity():
+    """同一形状（同じ半径）のCIRCLE5個を狭い範囲に配置して移動 → 一致件数・広がりは
+    コンパクト救済の条件を満たすが、形状種類数が1（最小2未満）のため不採用のまま
+    （形状多様性ガードはコンパクト救済にも適用される）"""
+    with tempfile.TemporaryDirectory() as d:
+        delta = (50.0, 30.0)
+
+        def build_a(msp):
+            _same_shape_circles(msp, 5, base_x=0, base_y=0, spacing=2.0)
+
+        def build_b(msp):
+            _same_shape_circles(msp, 5, base_x=0, base_y=0, dx=-delta[0], dy=-delta[1], spacing=2.0)
+
+        path_a, path_b = _save_pair(build_a, build_b, d)
+        cfg = _default_config()
+        doc, counts = _run_compare(path_a, path_b, d, cfg)
+
+        assert counts['unchanged_offset_entities'] == 0, \
+            "形状1種類のみのコンパクトな移動が誤って救済されている"
+        assert counts['deleted_entities'] == 5
+        assert counts['added_entities'] == 5
+        assert counts['detected_offsets'] == []
+
+
+def test_compact_rescue_respects_min_matches():
+    """異なる形状3個を狭い範囲に配置して移動 → 広がりは条件内だが、一致件数(3)が
+    コンパクト救済の最小件数(4)未満のため不採用のまま"""
+    with tempfile.TemporaryDirectory() as d:
+        delta = (50.0, 30.0)
+
+        def build_a(msp):
+            _distinct_circles(msp, 3, base_x=0, base_y=0, spacing=2.0)
+
+        def build_b(msp):
+            _distinct_circles(msp, 3, base_x=0, base_y=0, dx=-delta[0], dy=-delta[1], spacing=2.0)
+
+        path_a, path_b = _save_pair(build_a, build_b, d)
+        cfg = _default_config()
+        doc, counts = _run_compare(path_a, path_b, d, cfg)
+
+        assert counts['unchanged_offset_entities'] == 0
+        assert counts['deleted_entities'] == 3
+        assert counts['added_entities'] == 3
+        assert counts['detected_offsets'] == []
+
+
+def test_detected_offsets_include_span_and_compact_flag():
+    """2つのオフセット（大きな標準採用グループ・小さなコンパクト救済グループ）が
+    同時に検出される場合、detected_offsets の各要素に span・compact が含まれ、
+    それぞれ正しい値（標準採用はcompact=False、コンパクト救済はcompact=True）になる"""
+    with tempfile.TemporaryDirectory() as d:
+        delta_standard = (50.0, 0.0)   # 標準採用（①）: 12個・広く配置
+        delta_compact = (0.0, 80.0)    # コンパクト救済（②）: 5個・狭く配置
+
+        def build_a(msp):
+            _distinct_circles(msp, 12, base_x=0, base_y=0, radius_start=1.0)
+            _distinct_circles(msp, 5, base_x=0, base_y=500.0, radius_start=101.0, spacing=2.0)
+
+        def build_b(msp):
+            _distinct_circles(msp, 12, base_x=0, base_y=0,
+                               dx=-delta_standard[0], dy=-delta_standard[1], radius_start=1.0)
+            _distinct_circles(msp, 5, base_x=0, base_y=500.0,
+                               dx=-delta_compact[0], dy=-delta_compact[1], radius_start=101.0, spacing=2.0)
+
+        path_a, path_b = _save_pair(build_a, build_b, d)
+        cfg = _default_config()
+        doc, counts = _run_compare(path_a, path_b, d, cfg)
+
+        assert len(counts['detected_offsets']) == 2
+        by_offset = {d['offset']: d for d in counts['detected_offsets']}
+
+        standard = by_offset[delta_standard]
+        assert 'span' in standard and 'compact' in standard
+        assert standard['compact'] is False
+        assert standard['matches'] == 12
+
+        compact = by_offset[delta_compact]
+        assert 'span' in compact and 'compact' in compact
+        assert compact['compact'] is True
+        assert compact['matches'] == 5
+        assert compact['span'] <= cfg.compact_max_span
 
 
 if __name__ == '__main__':
