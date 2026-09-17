@@ -13,6 +13,7 @@ import os
 import gc
 
 from .common_utils import is_invisible
+from .offset_detector import detect_offsets, OffsetDetectionConfig
 
 # 高精度計算設定
 getcontext().prec = 50
@@ -1104,15 +1105,21 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
                                        added_color: int = 4,
                                        unchanged_color: int = 7,
                                        unchanged_offset_color: int = 8,
-                                       offset_b: Optional[Tuple[float, float]] = None) -> Tuple[bool, Optional[Dict[str, int]]]:
+                                       offset_b: Optional[Tuple[float, float]] = None,
+                                       offset_detection: Optional[OffsetDetectionConfig] = None) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """
     DXFファイル比較メイン処理（Streamlit用インターフェース）
 
-    オフセット補正（offset_b）は和集合型: 補正なしで一致した要素は従来どおり
-    UNCHANGED のまま残り、補正して初めて一致した要素だけが別レイヤー
-    UNCHANGED_OFFSET（file B の座標で描画）に追加される。ファイルBは常に
-    生の座標で展開されるため、ADDED/DELETED の座標にオフセットは適用されない
-    （offset_b はあくまで「一致判定を緩める」ためだけに使われる）。
+    オフセット補正は和集合型: 補正なしで一致した要素は従来どおり UNCHANGED の
+    まま残り、補正して初めて一致した要素だけが別レイヤー UNCHANGED_OFFSET
+    （file B の座標で描画）に追加される。ファイルBは常に生の座標で展開されるため、
+    ADDED/DELETED の座標にオフセットは適用されない。
+
+    オフセット値は2通りの与え方があり、両方指定した場合は両方が適用される
+    （和集合）:
+    - `offset_b`: 単一のオフセット値を明示的に指定する（従来からの経路）
+    - `offset_detection`: 複数のオフセット値を自動検出する（2026-09-17新設。
+      `utils/offset_detector.py` 参照）。しきい値を満たした候補だけが採用される
 
     Args:
         file_a: 基準DXFファイルパス
@@ -1126,16 +1133,24 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         offset_b: ファイルBとの一致判定に使うオフセット (dx, dy) のタプル (オプション)。
             座標のtolerance格子（既定0.05）の倍数でない場合、丸め先が1格子ずれて
             一致し損ねる要素が出ることがある。
+        offset_detection: 複数オフセットの自動検出を有効にする場合、
+            `OffsetDetectionConfig` を渡す（オプション。`None` なら自動検出しない）。
 
     Returns:
-        Tuple[bool, Optional[Dict[str, int]]]: (成功フラグ, エンティティ数情報)
+        Tuple[bool, Optional[Dict[str, Any]]]: (成功フラグ, エンティティ数情報)
             エンティティ数情報は以下のキーを含む辞書:
                 - deleted_entities: 削除されたエンティティ数
                 - added_entities: 追加されたエンティティ数
                 - unchanged_entities: 変更なしエンティティ数（オフセット無しで一致）
                 - unchanged_offset_entities: オフセット補正で一致したエンティティ数
+                  （offset_b・offset_detection 両方の一致分を合算）
                 - diff_entities: 差分エンティティ数（削除+追加）
                 - total_entities: 総エンティティ数（unchanged_offset_entities を含む）
+                - detected_offsets: 自動検出で採用されたオフセットのリスト
+                  （[{'offset': (dx, dy), 'matches': int, 'shapes': int}, ...]、
+                  一致件数降順。offset_detection未指定時は空リスト）
+                - rejected_offset_candidates: しきい値未満で不採用になった
+                  候補オフセット数（offset_detection未指定時は0）
     """
     try:
         # 設定の初期化
@@ -1188,6 +1203,36 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
                     offset_matched_b_hashes.add(b_hash)
                     matched_a_hashes_by_offset.add(shifted_hash)
 
+        # 第3パス（複数オフセットの自動検出。2026-09-17新設）:
+        # offset_b の手動指定で一致しなかった残りの未一致エンティティに対して、
+        # utils/offset_detector.py で複数のオフセット候補を自動検出する。
+        # offset_b と offset_detection は併用可能（和集合）。
+        detected_offsets_info: List[Dict[str, Any]] = []
+        rejected_offset_candidates = 0
+
+        if offset_detection is not None:
+            unmatched_a_for_detection = hashes_a - common_hashes - matched_a_hashes_by_offset
+            unmatched_b_for_detection = hashes_b - common_hashes - offset_matched_b_hashes
+
+            detected, rejected_offset_candidates = detect_offsets(
+                entities_a, entities_b,
+                unmatched_a_for_detection, unmatched_b_for_detection, hashes_a,
+                signature_fn=signature_generator.create_absolute_entity_signature,
+                hash_fn=diff_analyzer.generate_enhanced_hash,
+                entity_data_fn=diff_analyzer.create_entity_data_from_absolute,
+                translate_fn=translate_absolute_entity,
+                tolerance=tolerance,
+                config=offset_detection,
+            )
+            for detected_offset in detected:
+                offset_matched_b_hashes |= detected_offset.matched_b_hashes
+                matched_a_hashes_by_offset |= detected_offset.matched_a_hashes
+                detected_offsets_info.append({
+                    'offset': detected_offset.offset,
+                    'matches': len(detected_offset.matched_b_hashes),
+                    'shapes': detected_offset.distinct_shapes,
+                })
+
         deleted_hashes = hashes_a - common_hashes - matched_a_hashes_by_offset
         added_hashes = hashes_b - common_hashes - offset_matched_b_hashes
 
@@ -1205,7 +1250,9 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
             'unchanged_entities': unchanged_count,
             'unchanged_offset_entities': unchanged_offset_count,
             'diff_entities': diff_count,
-            'total_entities': total_count
+            'total_entities': total_count,
+            'detected_offsets': detected_offsets_info,
+            'rejected_offset_candidates': rejected_offset_candidates,
         }
 
         # 差分DXFファイル生成
