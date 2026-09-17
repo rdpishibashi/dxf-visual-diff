@@ -14,6 +14,7 @@ import gc
 
 from .common_utils import is_invisible
 from .offset_detector import detect_offsets, OffsetDetectionConfig
+from .extract_labels import clean_mtext_format_codes
 
 # 高精度計算設定
 getcontext().prec = 50
@@ -562,9 +563,18 @@ class SignatureGenerator:
             # 同じ最終座標・属性の entities は INSERT 元に関係なく同一として扱う
             
             # テキスト内容
+            # MTEXTは書式コード（\W=文字幅係数、\T=文字間隔等）を正規化してから
+            # 署名に使う。ラベル差分側（extract_labels.py::extract_text_from_entity）
+            # と判定基準を揃えるため（2026-09-17）——同じMTEXTペアが diff_labels.xlsx
+            # では「変更なし」、差分DXFでは「別物」と判定される不整合があった。
+            # 正規化するのは署名だけで、absolute_entity['text_content'] 自体（描画に
+            # 使われる）は書き換えない。TEXT/ATTRIBは対象外（元の文字列のまま比較）。
             text_content = absolute_entity.get('text_content')
             if text_content and text_content.strip():
-                clean_text = text_content.strip().replace('\n', '').replace('\r', '')
+                if entity_type == 'MTEXT':
+                    clean_text = clean_mtext_format_codes(text_content)
+                else:
+                    clean_text = text_content.strip().replace('\n', '').replace('\r', '')
                 signature_parts.append(f"text_{clean_text}")
             
             # ATTRIB固有情報

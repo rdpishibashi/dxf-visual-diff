@@ -41,7 +41,7 @@ class OffsetDetectionConfig:
     min_matches: int = 10
     min_distinct_shapes: int = 5
     max_offsets: int = 50
-    max_candidates: int = 100
+    max_candidates: int = 200
     max_instances_per_shape: int = 8
     # コンパクト救済（2026-09-17新設）: ①(min_matches/min_distinct_shapes)より
     # 緩い条件に加え、一致した図形群の広がりが compact_max_span 以下であれば採用する
