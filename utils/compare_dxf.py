@@ -1147,8 +1147,11 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
                 - diff_entities: 差分エンティティ数（削除+追加）
                 - total_entities: 総エンティティ数（unchanged_offset_entities を含む）
                 - detected_offsets: 自動検出で採用されたオフセットのリスト
-                  （[{'offset': (dx, dy), 'matches': int, 'shapes': int}, ...]、
-                  一致件数降順。offset_detection未指定時は空リスト）
+                  （[{'offset': (dx, dy), 'matches': int, 'shapes': int,
+                  'span': float, 'compact': bool}, ...]、一致件数降順。
+                  'span'は一致した図形群のバウンディングボックス対角長、
+                  'compact'はコンパクト救済（2026-09-17新設）で採用されたか。
+                  offset_detection未指定時は空リスト）
                 - rejected_offset_candidates: しきい値未満で不採用になった
                   候補オフセット数（offset_detection未指定時は0）
     """
@@ -1231,6 +1234,8 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
                     'offset': detected_offset.offset,
                     'matches': len(detected_offset.matched_b_hashes),
                     'shapes': detected_offset.distinct_shapes,
+                    'span': detected_offset.span,
+                    'compact': detected_offset.compact,
                 })
 
         deleted_hashes = hashes_a - common_hashes - matched_a_hashes_by_offset
