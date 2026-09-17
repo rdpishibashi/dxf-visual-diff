@@ -13,6 +13,7 @@ sys.path.insert(0, utils_path)
 
 from utils.compare_dxf import compare_dxf_files_and_generate_dxf
 from utils.common_utils import save_uploadedfile, handle_error
+from utils.offset_detector import OffsetDetectionConfig
 from utils.label_diff import (
     compute_label_differences,
     filter_change_rows_by_patterns,
@@ -74,8 +75,9 @@ def app():
             "- ADDED (デフォルト色: シアン): 比較対象ファイル(B)にのみ存在する要素",
             "- DELETED (デフォルト色: マゼンタ): 基準ファイル(A)にのみ存在する要素",
             "- UNCHANGED (デフォルト色: 白/黒): 両方のファイルに存在し変更がない要素",
-            "- UNCHANGED_OFFSET (デフォルト色: 灰): オフセット補正を有効にした場合のみ生成。"
-            "補正して初めて一致した要素（比較対象ファイル(B)の座標で描画）"
+            "- UNCHANGED_OFFSET (デフォルト色: 灰): 一部の図形だけが平行移動している場合に、"
+            "その移動量（オフセット）を自動検出して一致とみなした要素"
+            "（比較対象ファイル(B)の座標で描画。検出されたオフセットは結果画面に一覧表示されます）"
         ]
         
         st.info("\n".join(help_text))
@@ -153,6 +155,17 @@ def app():
     unchanged_offset_color = diff_config.DEFAULT_UNCHANGED_OFFSET_COLOR
     diff_label_patterns = label_filter_config.DIFF_LABEL_PREFIX_PATTERNS
 
+    # オフセット補正の自動検出設定（2026-09-17新設。手動の「オフセット補正設定」UIは廃止）
+    offset_detection = None
+    if diff_config.AUTO_OFFSET_DETECTION:
+        offset_detection = OffsetDetectionConfig(
+            min_matches=diff_config.AUTO_OFFSET_MIN_MATCHES,
+            min_distinct_shapes=diff_config.AUTO_OFFSET_MIN_DISTINCT_SHAPES,
+            max_offsets=diff_config.AUTO_OFFSET_MAX_OFFSETS,
+            max_candidates=diff_config.AUTO_OFFSET_MAX_CANDIDATES,
+            max_instances_per_shape=diff_config.AUTO_OFFSET_MAX_INSTANCES_PER_SHAPE,
+        )
+
     with st.expander("オプション設定（config.py で変更できます）", expanded=False):
         st.caption(
             f"座標マージン: {tolerance} ｜ "
@@ -161,73 +174,26 @@ def app():
             f"レイヤー色（削除/追加/変更なし/オフセット一致）: "
             f"{deleted_color}/{added_color}/{unchanged_color}/{unchanged_offset_color}"
         )
+        if offset_detection:
+            st.caption(
+                f"オフセット自動検出: 有効 ｜ "
+                f"採用条件: 一致{offset_detection.min_matches}件以上 かつ "
+                f"形状{offset_detection.min_distinct_shapes}種類以上 ｜ "
+                f"最大検出数: {offset_detection.max_offsets}個"
+            )
+            st.info(
+                "**オフセット補正の自動検出について**\n\n"
+                "一部の回路ブロックだけが平行移動している場合、その移動量（オフセット）を"
+                "自動的に検出し、UNCHANGED_OFFSET レイヤーとして一致扱いにします。"
+                "補正前から一致している要素はそのまま UNCHANGED に残り、"
+                "ADDED・DELETED は常にオフセットを適用しない生の座標のまま出力されます。"
+                "検出されたオフセットの一覧は比較実行後の結果画面に表示されます。\n\n"
+                "閾値未満の候補やオフセット値の傾向を事前に確認したい場合は、"
+                "調査用CLI `analyze_offset.py` を個別に実行してください。"
+            )
+        else:
+            st.caption("オフセット自動検出: 無効（config.py の AUTO_OFFSET_DETECTION）")
 
-    # オフセット補正設定
-    with st.expander("オフセット補正設定（オプション）", expanded=False):
-        st.info("""
-        **オフセット補正について**
-
-        比較対象ファイル(B)との一致判定に座標オフセットを適用できます。これにより、
-        基準点の違いによる誤検知を減らすことができます。
-
-        補正前から一致している要素はそのまま **UNCHANGED** に残り、補正して初めて
-        一致した要素だけが別レイヤー **UNCHANGED_OFFSET**（比較対象ファイル(B)の座標で描画）
-        に追加されます。ADDED・DELETED はオフセットを適用しない生の座標のまま出力されます。
-
-        **使い方:**
-        1. まず `analyze_offset.py` で2つのファイルを分析
-        2. 結果から支配的なオフセット値 (dx, dy) を確認
-        3. そのオフセット値をここに入力
-
-        **注意:** ファイルの順序は `analyze_offset.py` と同じにしてください。
-        """)
-
-        # セッション状態の初期化
-        if 'offset_pairs' not in st.session_state:
-            st.session_state.offset_pairs = {}
-
-        # 各ペアのオフセット設定
-        for i in range(5):
-            with st.container():
-                st.write(f"**ペア {i+1} のオフセット設定**")
-
-                col1, col2, col3 = st.columns([2, 1, 1])
-
-                with col1:
-                    use_offset = st.checkbox(
-                        f"オフセット補正を有効化",
-                        key=f"use_offset_{i}",
-                        value=False
-                    )
-
-                with col2:
-                    offset_x = st.number_input(
-                        f"dx (X方向オフセット)",
-                        value=0.0,
-                        format="%.4f",
-                        key=f"offset_x_{i}",
-                        disabled=not use_offset
-                    )
-
-                with col3:
-                    offset_y = st.number_input(
-                        f"dy (Y方向オフセット)",
-                        value=0.0,
-                        format="%.4f",
-                        key=f"offset_y_{i}",
-                        disabled=not use_offset
-                    )
-
-                # オフセット値を保存
-                if use_offset:
-                    st.session_state.offset_pairs[i] = (offset_x, offset_y)
-                    st.success(f"ペア{i+1}: オフセット ({offset_x}, {offset_y}) を適用します")
-                else:
-                    if i in st.session_state.offset_pairs:
-                        del st.session_state.offset_pairs[i]
-
-                st.divider()
-    
     if file_pairs_valid:
         try:
             # ファイルが選択されたら処理ボタンを表示
@@ -240,7 +206,7 @@ def app():
                     # ラベル比較結果を格納するリスト
                     diff_sheets = []
 
-                    for idx, (file_a, file_b, pair_name, output_filename) in enumerate(file_pairs_valid):
+                    for file_a, file_b, pair_name, output_filename in file_pairs_valid:
                         # 一時ファイルに保存
                         temp_file_a = save_uploadedfile(file_a)
                         temp_file_b = save_uploadedfile(file_b)
@@ -248,10 +214,8 @@ def app():
 
                         temp_files_to_cleanup.extend([temp_file_a, temp_file_b, temp_output])
 
-                        # オフセット補正の取得
-                        offset_b = st.session_state.offset_pairs.get(idx, None)
-
-                        # DXF比較処理
+                        # DXF比較処理（オフセット補正は自動検出。config.py の
+                        # AUTO_OFFSET_DETECTION で無効化しない限り常に適用される）
                         success, entity_counts = compare_dxf_files_and_generate_dxf(
                             temp_file_a,
                             temp_file_b,
@@ -261,7 +225,7 @@ def app():
                             added_color=added_color,
                             unchanged_color=unchanged_color,
                             unchanged_offset_color=unchanged_offset_color,
-                            offset_b=offset_b
+                            offset_detection=offset_detection
                         )
 
                         if success:
@@ -422,6 +386,21 @@ def app():
                                 mime="application/dxf",
                                 key=f"download_{pair_name}"
                             )
+
+                        # 検出されたオフセットの一覧を表示（自動検出未使用・
+                        # 検出0件の場合は表示しない）
+                        detected_offsets = entity_counts.get('detected_offsets', []) if entity_counts else []
+                        if detected_offsets:
+                            rejected_count = entity_counts.get('rejected_offset_candidates', 0)
+                            with st.expander(f"🔍 検出されたオフセット（{len(detected_offsets)}個）", expanded=False):
+                                for d in detected_offsets:
+                                    dx, dy = d['offset']
+                                    st.caption(
+                                        f"({dx:.2f}, {dy:.2f}) ｜ 一致: {d['matches']}件 ｜ "
+                                        f"形状の種類: {d['shapes']}種類"
+                                    )
+                                if rejected_count > 0:
+                                    st.caption(f"※ しきい値未満で不採用の候補: {rejected_count}個")
                     else:
                         # ZIPダウンロード時はファイルリストのみ表示
                         entity_info = ""
@@ -460,8 +439,9 @@ def app():
                 - ADDED (色{settings.get('added_color', 4)}): 比較対象ファイル(B)にのみ存在する要素
                 - DELETED (色{settings.get('deleted_color', 6)}): 基準ファイル(A)にのみ存在する要素
                 - UNCHANGED (色{settings.get('unchanged_color', 7)}): 両方のファイルに存在し変更がない要素
-                - UNCHANGED_OFFSET (色{settings.get('unchanged_offset_color', 8)}): オフセット補正で
-                  初めて一致した要素（オフセット補正を有効にしたペアのみ生成。比較対象ファイル(B)の座標で描画）
+                - UNCHANGED_OFFSET (色{settings.get('unchanged_offset_color', 8)}): 自動検出された
+                  オフセットで一致した要素（検出0件のペアでは生成されません。比較対象ファイル(B)の座標で描画。
+                  検出内容は各ペアの「🔍 検出されたオフセット」から確認できます）
                 """)
     else:
         st.warning("少なくとも1つのファイルペア（基準DXFファイル、比較対象DXFファイル）を登録してください。")
