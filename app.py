@@ -164,6 +164,9 @@ def app():
             max_offsets=diff_config.AUTO_OFFSET_MAX_OFFSETS,
             max_candidates=diff_config.AUTO_OFFSET_MAX_CANDIDATES,
             max_instances_per_shape=diff_config.AUTO_OFFSET_MAX_INSTANCES_PER_SHAPE,
+            compact_min_matches=diff_config.AUTO_OFFSET_COMPACT_MIN_MATCHES,
+            compact_min_distinct_shapes=diff_config.AUTO_OFFSET_COMPACT_MIN_DISTINCT_SHAPES,
+            compact_max_span=diff_config.AUTO_OFFSET_COMPACT_MAX_SPAN,
         )
 
     with st.expander("オプション設定（config.py で変更できます）", expanded=False):
@@ -177,8 +180,11 @@ def app():
         if offset_detection:
             st.caption(
                 f"オフセット自動検出: 有効 ｜ "
-                f"採用条件: 一致{offset_detection.min_matches}件以上 かつ "
+                f"採用条件①: 一致{offset_detection.min_matches}件以上 かつ "
                 f"形状{offset_detection.min_distinct_shapes}種類以上 ｜ "
+                f"採用条件②（コンパクト救済）: 一致{offset_detection.compact_min_matches}件以上 かつ "
+                f"形状{offset_detection.compact_min_distinct_shapes}種類以上 かつ "
+                f"広がり{offset_detection.compact_max_span}以下 ｜ "
                 f"最大検出数: {offset_detection.max_offsets}個"
             )
             st.info(
@@ -186,8 +192,11 @@ def app():
                 "一部の回路ブロックだけが平行移動している場合、その移動量（オフセット）を"
                 "自動的に検出し、UNCHANGED_OFFSET レイヤーとして一致扱いにします。"
                 "補正前から一致している要素はそのまま UNCHANGED に残り、"
-                "ADDED・DELETED は常にオフセットを適用しない生の座標のまま出力されます。"
-                "検出されたオフセットの一覧は比較実行後の結果画面に表示されます。\n\n"
+                "ADDED・DELETED は常にオフセットを適用しない生の座標のまま出力されます。\n\n"
+                "一致件数が少ない移動（記号1個分など）でも、一致した図形が狭い範囲に"
+                "まとまっていれば「コンパクト救済」として採用されます（散在した偶然の"
+                "一致は除外されます）。検出されたオフセットの一覧は比較実行後の結果画面に"
+                "表示されます。\n\n"
                 "閾値未満の候補やオフセット値の傾向を事前に確認したい場合は、"
                 "調査用CLI `analyze_offset.py` を個別に実行してください。"
             )
@@ -395,9 +404,14 @@ def app():
                             with st.expander(f"🔍 検出されたオフセット（{len(detected_offsets)}個）", expanded=False):
                                 for d in detected_offsets:
                                     dx, dy = d['offset']
+                                    # span/compact は自動検出未使用の旧セッション結果には
+                                    # 存在しない可能性があるため .get() で読む
+                                    span = d.get('span', 0.0)
+                                    compact_note = "（コンパクト救済）" if d.get('compact') else ""
                                     st.caption(
                                         f"({dx:.2f}, {dy:.2f}) ｜ 一致: {d['matches']}件 ｜ "
-                                        f"形状の種類: {d['shapes']}種類"
+                                        f"形状の種類: {d['shapes']}種類 ｜ "
+                                        f"広がり: {span:.1f}{compact_note}"
                                     )
                                 if rejected_count > 0:
                                     st.caption(f"※ しきい値未満で不採用の候補: {rejected_count}個")
