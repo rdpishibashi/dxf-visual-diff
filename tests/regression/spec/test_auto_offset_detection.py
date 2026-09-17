@@ -142,7 +142,8 @@ def test_detects_single_block_move():
         assert detected['offset'] == delta
         assert detected['matches'] == 12
         assert detected['shapes'] == 12
-        assert 'UNCHANGED_OFFSET' in doc.layers
+        assert 'A_UNCHANGED_OFFSET' in doc.layers
+        assert 'B_UNCHANGED_OFFSET' in doc.layers
 
 
 def test_below_min_matches_is_not_adopted():
@@ -313,7 +314,8 @@ def test_exact_match_unaffected_by_detection():
         assert counts['unchanged_entities'] == 1
         assert counts['unchanged_offset_entities'] == 0
         assert counts['detected_offsets'] == []
-        assert (0.0, 0.0) in _line_starts(doc, 'UNCHANGED')
+        assert (0.0, 0.0) in _line_starts(doc, 'A_UNCHANGED')
+        assert (0.0, 0.0) in _line_starts(doc, 'B_UNCHANGED')
 
 
 def test_added_deleted_use_raw_coordinates():
@@ -330,8 +332,8 @@ def test_added_deleted_use_raw_coordinates():
         cfg = _default_config()
         doc, counts = _run_compare(path_a, path_b, d, cfg)
 
-        assert (200.0, 200.0) in _line_starts(doc, 'DELETED')
-        assert (300.0, 300.0) in _line_starts(doc, 'ADDED')
+        assert (200.0, 200.0) in _line_starts(doc, 'A_DELETED')
+        assert (300.0, 300.0) in _line_starts(doc, 'B_ADDED')
 
 
 def test_detection_disabled_matches_baseline():
@@ -354,7 +356,8 @@ def test_detection_disabled_matches_baseline():
         assert counts['added_entities'] == 12
         assert counts['detected_offsets'] == []
         assert counts['rejected_offset_candidates'] == 0
-        assert 'UNCHANGED_OFFSET' not in doc.layers
+        assert 'A_UNCHANGED_OFFSET' not in doc.layers
+        assert 'B_UNCHANGED_OFFSET' not in doc.layers
 
 
 def test_compact_small_group_is_rescued():

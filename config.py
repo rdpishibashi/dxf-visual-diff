@@ -37,10 +37,19 @@ class DiffConfig:
 
     # レイヤー色設定（AutoCADカラーインデックス）
     #   1=赤 / 2=黄 / 3=緑 / 4=シアン / 5=青 / 6=マゼンタ / 7=白・黒 / 8=灰 / 9=明灰
-    DEFAULT_DELETED_COLOR = 6      # 削除図形（基準ファイルAのみに存在）
-    DEFAULT_ADDED_COLOR = 4        # 追加図形（比較対象ファイルBのみに存在）
-    DEFAULT_UNCHANGED_COLOR = 7    # 変更なし図形
-    DEFAULT_UNCHANGED_OFFSET_COLOR = 8  # オフセット補正で一致した図形（B側の座標で描画）
+    #
+    #   2026-09-18、差分DXFを6レイヤー構成（A_*/B_* 接頭辞）に変更。旧
+    #   DELETED/ADDED/UNCHANGED/UNCHANGED_OFFSET の4レイヤーは廃止し、
+    #   「A_*をすべてONにすればファイルAの全図形が色の区別つきで再現できる」
+    #   「B_*をすべてONにすればファイルBの全図形が色の区別つきで再現できる」
+    #   ようにした。DXFの色はレイヤー属性ではなくエンティティ属性として
+    #   各図形に直接書き込まれるため、1レイヤーに複数カテゴリが混在しても
+    #   色による区別は失われない。
+    DEFAULT_DELETED_COLOR = 6           # A_DELETED（削除図形。基準ファイルAのみに存在）
+    DEFAULT_ADDED_COLOR = 4             # B_ADDED（追加図形。比較対象ファイルBのみに存在）
+    DEFAULT_UNCHANGED_COLOR = 7         # A_UNCHANGED / B_UNCHANGED（変更なし図形。同一座標）
+    DEFAULT_UNCHANGED_OFFSET_A_COLOR = 8  # A_UNCHANGED_OFFSET（オフセット一致・A側旧位置。濃灰）
+    DEFAULT_UNCHANGED_OFFSET_B_COLOR = 9  # B_UNCHANGED_OFFSET（オフセット一致・B側新位置。明灰）
 
     # ── オフセット補正の自動検出（2026-09-17新設。旧・手動設定UIは廃止）──
     #   ファイルA・Bで一致しなかった図形どうしを、位置に依存しない「形状」で
