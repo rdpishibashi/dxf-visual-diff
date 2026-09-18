@@ -1071,7 +1071,7 @@ class OutputGenerator:
         Args:
             unchanged_offset_a_hashes: オフセット一致したA側ハッシュ集合。
                 呼び出し側で common_hashes を除外済みであること（そうしないと
-                A_UNCHANGED と二重描画になる。matched_a_hashes は common_hashes と
+                UNCHANGED と二重描画になる。matched_a_hashes は common_hashes と
                 重なりうる——B側は unmatched_b 由来のため構造上重ならないのに対し、
                 A側は「未一致B要素を平行移動した先」が common な A要素の位置と
                 偶然一致することがあるため）。
@@ -1335,7 +1335,7 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         # matched_a_hashes_by_offset は common_hashes と重なりうる——B側は
         # unmatched_b 由来のため構造上重ならないのに対し、A側は「未一致B要素を
         # 平行移動した先」が common な A要素の位置と偶然一致することがある
-        # （実データで4件・23件の重複を確認）。除外しないと A_UNCHANGED と
+        # （実データで4件・23件の重複を確認）。除外しないと UNCHANGED と
         # A_UNCHANGED_OFFSET に同じ図形が二重に描かれる。
         unchanged_offset_a_hashes = matched_a_hashes_by_offset - common_hashes
 
