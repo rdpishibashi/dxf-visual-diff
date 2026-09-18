@@ -35,6 +35,13 @@ A_ALL/B_ALL）であり、「A_ALL を1枚ONにするとファイルAの全図�
        同じ扱い）。
     7. A側/B側の件数は揃わないことがある（複数のB図形が1つのA図形に対応する
        ことがあるため。バグではない）。
+    8. A_ALL/B_ALL以外の5レイヤー（A_DELETED/B_ADDED/UNCHANGED/
+       A_UNCHANGED_OFFSET/B_UNCHANGED_OFFSET）は既定で非表示（レイヤーOFF）
+       にする（2026-09-18追加のユーザー要求「A_ALLとB_ALL以外は非表示にし、
+       必要なときにユーザー自身がONにする」）。A_ALL/B_ALLは表示のまま。
+       エンティティ自身の色（正の色番号）は変えない——OFFはレイヤー側の色を
+       負にするDXFの標準的な表現であり、ユーザーがレイヤーをONに戻せば
+       元の色分け表示にそのまま戻る。
 
 以前どう壊れていたか（7レイヤー化前）:
     外部CADソフトでファイルA・Bそれぞれの全体を見るには、A_*/B_*で始まる
@@ -396,6 +403,30 @@ def test_entities_carry_explicit_color_not_bylayer():
         b_all_with_color = _circles_with_color(doc, 'B_ALL')
         assert unchanged_with_color <= a_all_with_color
         assert unchanged_with_color <= b_all_with_color
+
+
+# ── 9. A_ALL/B_ALL以外は既定で非表示（レイヤーOFF）、A_ALL/B_ALLは表示のまま ──
+
+def test_only_view_layers_visible_by_default():
+    with tempfile.TemporaryDirectory() as d:
+        path_a, path_b, delta = _build_full_category_pair(d)
+        cfg = _default_config()
+        doc, counts = _run_compare(path_a, path_b, d, offset_detection=cfg)
+
+        hidden_layers = ('A_DELETED', 'B_ADDED', 'UNCHANGED',
+                          'A_UNCHANGED_OFFSET', 'B_UNCHANGED_OFFSET')
+        for layer_name in hidden_layers:
+            layer = doc.layers.get(layer_name)
+            assert layer.is_off(), f"{layer_name} が既定で非表示になっていない"
+
+        for layer_name in ('A_ALL', 'B_ALL'):
+            layer = doc.layers.get(layer_name)
+            assert not layer.is_off(), f"{layer_name} が既定で非表示になってしまっている"
+
+        # レイヤーOFFはレイヤー自体の色の符号だけを変える。エンティティ自身の
+        # 色（正の値）はそのままであること（ONに戻せば元の色分けが復元される）
+        for e in _entities_on_layer(doc, 'A_DELETED'):
+            assert e.dxf.color > 0, "非表示レイヤーのエンティティ色が書き換わっている"
 
 
 if __name__ == '__main__':

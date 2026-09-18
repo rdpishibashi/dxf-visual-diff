@@ -1096,6 +1096,12 @@ class OutputGenerator:
                 layer_color = self.layer_config.get_layer_color(diff_type)
                 layer = layers.new(layer_name)
                 layer.color = layer_color
+                # A_ALL/B_ALL以外は既定で非表示にする（外部CADで開いた直後は
+                # 合成レイヤーだけが見え、詳細カテゴリ層はユーザーが必要に応じて
+                # 手動でONにする運用。エンティティ自身の色は変えないため、ONに
+                # すればいつでも元の色分け表示に戻る）
+                if diff_type not in ('A_ALL', 'B_ALL'):
+                    layer.off()
 
             a_all_layer = self.layer_config.get_layer_name('A_ALL')
             b_all_layer = self.layer_config.get_layer_name('B_ALL')
