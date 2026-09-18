@@ -44,21 +44,21 @@ TOLERANCE = 0.05
 
 
 def _save_pair(build_a, build_b, tmpdir, name='pair'):
-    doc_a = ezdxf.new()
-    build_a(doc_a.modelspace())
-    doc_b = ezdxf.new()
-    build_b(doc_b.modelspace())
-    path_a = os.path.join(tmpdir, f'{name}_a.dxf')
-    path_b = os.path.join(tmpdir, f'{name}_b.dxf')
-    doc_a.saveas(path_a)
-    doc_b.saveas(path_b)
-    return path_a, path_b
+    doc_old = ezdxf.new()
+    build_a(doc_old.modelspace())
+    doc_new = ezdxf.new()
+    build_b(doc_new.modelspace())
+    path_old = os.path.join(tmpdir, f'{name}_a.dxf')
+    path_new = os.path.join(tmpdir, f'{name}_b.dxf')
+    doc_old.saveas(path_old)
+    doc_new.saveas(path_new)
+    return path_old, path_new
 
 
-def _run_compare(path_a, path_b, tmpdir, offset_detection=None, suffix=""):
+def _run_compare(path_old, path_new, tmpdir, offset_detection=None, suffix=""):
     output_path = os.path.join(tmpdir, f'diff{suffix}.dxf')
     success, entity_counts = compare_dxf_files_and_generate_dxf(
-        path_a, path_b, output_path,
+        path_old, path_new, output_path,
         tolerance=TOLERANCE,
         offset_detection=offset_detection,
     )
@@ -79,8 +79,8 @@ def test_mtext_format_only_difference_is_unchanged():
             msp.add_mtext(r'\A1;\W0.912688;\T0.912688;SCALE',
                           dxfattribs={'insert': (0, 0, 0), 'layer': '0'})
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
-        doc, counts = _run_compare(path_a, path_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
+        doc, counts = _run_compare(path_old, path_new, d)
 
         assert counts['unchanged_entities'] == 1
         assert counts['deleted_entities'] == 0
@@ -99,8 +99,8 @@ def test_mtext_different_text_still_differs():
             msp.add_mtext(r'\A1;\W0.814801;\T0.814801;WEIGHT',
                           dxfattribs={'insert': (0, 0, 0), 'layer': '0'})
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
-        doc, counts = _run_compare(path_a, path_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
+        doc, counts = _run_compare(path_old, path_new, d)
 
         assert counts['unchanged_entities'] == 0
         assert counts['deleted_entities'] == 1
@@ -132,14 +132,14 @@ def test_mtext_format_difference_with_offset_becomes_unchanged_offset():
                 msp.add_mtext(fmt_b, dxfattribs={
                     'insert': (i * 2.0 - delta[0], -delta[1], 0), 'layer': '0'})
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
         # コンパクト救済の既定値（一致4件以上・形状2種類以上・広がり15以下）で
         # 十分採用される規模（5個・広がり約8）にしている
         cfg = OffsetDetectionConfig(min_matches=10, min_distinct_shapes=5, max_offsets=20,
                                      max_candidates=50, max_instances_per_shape=8,
                                      compact_min_matches=4, compact_min_distinct_shapes=2,
                                      compact_max_span=15.0)
-        doc, counts = _run_compare(path_a, path_b, d, offset_detection=cfg)
+        doc, counts = _run_compare(path_old, path_new, d, offset_detection=cfg)
 
         assert counts['unchanged_offset_entities'] == 5, \
             "書式コード正規化とオフセット自動検出を組み合わせても救済されなかった"
@@ -162,15 +162,15 @@ def test_output_dxf_preserves_original_format_codes():
             msp.add_mtext(r'\A1;\W0.912688;\T0.912688;SCALE',
                           dxfattribs={'insert': (0, 0, 0), 'layer': '0'})
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
-        doc, counts = _run_compare(path_a, path_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
+        doc, counts = _run_compare(path_old, path_new, d)
 
         assert counts['unchanged_entities'] == 1
         unchanged_mtexts = [e for e in doc.modelspace().query('MTEXT')
                              if e.dxf.layer == 'UNCHANGED']
         assert len(unchanged_mtexts) == 1
         # UNCHANGEDはA側の実体から描画される（create_diff_dxf の仕様、
-        # 2026-09-18の7レイヤー化でA_UNCHANGED/B_UNCHANGEDを統合した後も同じ）。
+        # 2026-09-18の7レイヤー化でOLD_UNCHANGED/NEW_UNCHANGEDを統合した後も同じ）。
         # 出力された生テキストが、正規化前のAの元の書式コードと完全一致することを確認する
         assert unchanged_mtexts[0].dxf.text == original_a, \
             "出力DXFのMTEXTが正規化後のプレーンテキストになっている（描画データが" \
@@ -189,8 +189,8 @@ def test_plain_text_entity_not_affected():
         def build_b(msp):
             msp.add_text(r'A\W2.0;B', dxfattribs={'insert': (0, 0, 0), 'layer': '0'})
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
-        doc, counts = _run_compare(path_a, path_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
+        doc, counts = _run_compare(path_old, path_new, d)
 
         # もしMTEXT用の正規化が誤ってTEXTにも適用されていれば、
         # \W2.0; のような疑似書式コードが除去されて両者が一致してしまう。
