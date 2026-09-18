@@ -5,10 +5,11 @@
 2026-09-16 のユーザー要求「A, B が一致した図形要素も（座標は一致しないが）
 UNCHANGED に加えて表示したい」に対応する。
 
-2026-09-18、出力を6レイヤー構成（A_*/B_* 接頭辞）に変更したことに伴い、
-レイヤー名の期待値を更新した（`A_DELETED`/`B_ADDED`/`A_UNCHANGED`/
-`B_UNCHANGED`/`A_UNCHANGED_OFFSET`/`B_UNCHANGED_OFFSET`）。
-オフセット一致は今や A_UNCHANGED_OFFSET（A座標）・B_UNCHANGED_OFFSET（B座標）
+2026-09-18、出力を7レイヤー構成（`A_DELETED`/`B_ADDED`/`UNCHANGED`/
+`A_UNCHANGED_OFFSET`/`B_UNCHANGED_OFFSET`/`A_ALL`/`B_ALL`）に変更したことに
+伴い、レイヤー名の期待値を更新した（旧A_UNCHANGED/B_UNCHANGEDはUNCHANGED
+1枚に統合。詳細は tests/regression/spec/test_seven_layer_view_layers.py 参照）。
+オフセット一致は A_UNCHANGED_OFFSET（A座標）・B_UNCHANGED_OFFSET（B座標）
 の**両方**に描かれる（旧テストは「A側旧位置には描かれない」ことを検証していたが、
 それは旧・単一レイヤー仕様の話であり、6レイヤー化後は仕様が変わっている）。
 
@@ -116,20 +117,17 @@ def _run_compare(path_a, path_b, tmpdir, offset_b, suffix=""):
 
 
 def test_exact_match_stays_unchanged_with_offset():
-    """完全一致の要素は、オフセット有効時でも A_UNCHANGED/B_UNCHANGED に残る
+    """完全一致の要素は、オフセット有効時でも UNCHANGED に残る
     （旧・置き換え型ではDELETED+ADDEDに転落していたケース）。
-    A_UNCHANGED は entities_a、B_UNCHANGED は entities_b の実体から描画される
-    （6レイヤー化、2026-09-18）ため、両方に同じ座標で存在することを確認する"""
+    UNCHANGED は entities_a の実体から1回だけ描画される（7レイヤー化、
+    2026-09-18。旧A_UNCHANGED/B_UNCHANGEDの2枚持ちから統合）"""
     with tempfile.TemporaryDirectory() as d:
         path_a, path_b = _build_pair(*OFFSET, tmpdir=d)
         doc, entity_counts = _run_compare(path_a, path_b, d, OFFSET)
 
-        a_unchanged_starts = _line_starts(doc, 'A_UNCHANGED')
-        b_unchanged_starts = _line_starts(doc, 'B_UNCHANGED')
-        assert (0.0, 0.0) in a_unchanged_starts, \
-            "完全一致のLINEがA_UNCHANGEDレイヤーに存在しない"
-        assert (0.0, 0.0) in b_unchanged_starts, \
-            "完全一致のLINEがB_UNCHANGEDレイヤーに存在しない"
+        unchanged_starts = _line_starts(doc, 'UNCHANGED')
+        assert (0.0, 0.0) in unchanged_starts, \
+            "完全一致のLINEがUNCHANGEDレイヤーに存在しない"
         assert entity_counts['unchanged_entities'] >= 1
 
 

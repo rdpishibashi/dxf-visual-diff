@@ -314,8 +314,7 @@ def test_exact_match_unaffected_by_detection():
         assert counts['unchanged_entities'] == 1
         assert counts['unchanged_offset_entities'] == 0
         assert counts['detected_offsets'] == []
-        assert (0.0, 0.0) in _line_starts(doc, 'A_UNCHANGED')
-        assert (0.0, 0.0) in _line_starts(doc, 'B_UNCHANGED')
+        assert (0.0, 0.0) in _line_starts(doc, 'UNCHANGED')
 
 
 def test_added_deleted_use_raw_coordinates():
