@@ -14,13 +14,8 @@ sys.path.insert(0, utils_path)
 from utils.compare_dxf import compare_dxf_files_and_generate_dxf
 from utils.common_utils import save_uploadedfile, handle_error
 from utils.offset_detector import OffsetDetectionConfig
-from utils.label_diff import (
-    compute_label_differences,
-    filter_change_rows_by_patterns,
-    build_diff_labels_workbook,
-)
 
-from config import diff_config, label_filter_config
+from config import diff_config
 
 st.set_page_config(
     page_title="DXF Visual Diff",
@@ -38,9 +33,9 @@ def generate_output_filename(file_a_name, file_b_name):
 
     return f"{file_a_base}_vs_{file_b_base}.dxf"
 
-def create_zip_archive(results, diff_labels_data=None):
+def create_zip_archive(results):
     """
-    複数のDXFファイルとExcelファイルをZIPアーカイブに圧縮
+    複数のDXFファイルをZIPアーカイブに圧縮
     """
     zip_buffer = BytesIO()
 
@@ -49,10 +44,6 @@ def create_zip_archive(results, diff_labels_data=None):
             if success and dxf_data:
                 # ZIPファイル内のファイル名を設定
                 zip_file.writestr(output_filename, dxf_data)
-
-        # Excelファイルを追加
-        if diff_labels_data:
-            zip_file.writestr('diff_labels.xlsx', diff_labels_data)
 
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
@@ -68,21 +59,26 @@ def app():
             "",
             "**使用手順：**",
             "1. 各ファイルペアを登録してください（最大5ペア）",
-            "2. 必要に応じてオプション設定を調整します",
-            "3. 「DXF差分を比較」ボタンをクリックして処理を実行します",
+            "2. 「DXF差分を比較」ボタンをクリックして処理を実行します",
             "",
-            "**出力DXFファイルの内容（6レイヤー構成）：**",
-            "「A_」で始まるレイヤーだけを表示すると基準ファイル(A)の図面が、"
-            "「B_」で始まるレイヤーだけを表示すると比較対象ファイル(B)の図面が、"
-            "それぞれ変更箇所の色分けつきで再現されます。",
+            "**出力DXFファイルの内容（7レイヤー構成）：**",
+            "外部CADソフトで開いた直後は「A_ALL」「B_ALL」の2枚だけが表示された状態になり、"
+            "「A_ALL」で基準ファイル(A)の図面全体が、「B_ALL」で比較対象ファイル(B)の図面全体が、"
+            "それぞれ変更箇所の色分けつきで再現されます"
+            "（複数レイヤーを選択する手間を無くすための合成レイヤーです）。"
+            "詳細を個別に確認したい場合は、以下のカテゴリ別レイヤー（既定では非表示）を"
+            "手動でONにしてください。",
             "- A_DELETED (デフォルト色: マゼンタ): 基準ファイル(A)にのみ存在する要素",
             "- B_ADDED (デフォルト色: シアン): 比較対象ファイル(B)にのみ存在する要素",
-            "- A_UNCHANGED / B_UNCHANGED (デフォルト色: 白/黒): 両方のファイルに存在し"
-            "変更がない要素（同一座標。由来のファイルだけがA/Bで異なります）",
+            "- UNCHANGED (デフォルト色: 白/黒): 両方のファイルに存在し変更がない要素"
+            "（A/Bで内容が同一のため1レイヤーに統合しています）",
             "- A_UNCHANGED_OFFSET (デフォルト色: 濃灰) / B_UNCHANGED_OFFSET (デフォルト色: 明灰): "
             "一部の図形だけが平行移動している場合に、その移動量（オフセット）を自動検出して"
             "一致とみなした要素（それぞれ基準ファイル(A)・比較対象ファイル(B)の座標で描画。"
-            "検出されたオフセットは結果画面に一覧表示されます）"
+            "検出されたオフセットは結果画面に一覧表示されます）",
+            "- A_ALL / B_ALL: 上記カテゴリ別レイヤーのうち、それぞれファイルA/Bの再現に"
+            "必要なもの（A_ALL = A_DELETED + UNCHANGED + A_UNCHANGED_OFFSET、"
+            "B_ALL = B_ADDED + UNCHANGED + B_UNCHANGED_OFFSET）を1枚に複製した合成レイヤー"
         ]
         
         st.info("\n".join(help_text))
@@ -152,14 +148,13 @@ def app():
                 st.success(f"Pair{i+1}: {st.session_state.file_pairs[i]['fileA'].name} と {st.session_state.file_pairs[i]['fileB'].name} を比較")
                 st.info(f"出力ファイル名: {output_filename}")
     
-    # オプション設定（2026-09 に config.py へ移行。UI からは変更できない）
+    # 設定値はconfig.pyから取得（管理者用。UIには表示しない）
     tolerance = diff_config.DEFAULT_TOLERANCE
     deleted_color = diff_config.DEFAULT_DELETED_COLOR
     added_color = diff_config.DEFAULT_ADDED_COLOR
     unchanged_color = diff_config.DEFAULT_UNCHANGED_COLOR
     unchanged_offset_a_color = diff_config.DEFAULT_UNCHANGED_OFFSET_A_COLOR
     unchanged_offset_b_color = diff_config.DEFAULT_UNCHANGED_OFFSET_B_COLOR
-    diff_label_patterns = label_filter_config.DIFF_LABEL_PREFIX_PATTERNS
 
     # オフセット補正の自動検出設定（2026-09-17新設。手動の「オフセット補正設定」UIは廃止）
     offset_detection = None
@@ -175,42 +170,6 @@ def app():
             compact_max_span=diff_config.AUTO_OFFSET_COMPACT_MAX_SPAN,
         )
 
-    with st.expander("オプション設定（config.py で変更できます）", expanded=False):
-        st.caption(
-            f"座標マージン: {tolerance} ｜ "
-            f"差分抽出するラベルの先頭文字列: "
-            f"{'、'.join(diff_label_patterns) if diff_label_patterns else 'なし（全ラベル）'} ｜ "
-            f"レイヤー色（削除/追加/変更なし/オフセット一致A側/オフセット一致B側）: "
-            f"{deleted_color}/{added_color}/{unchanged_color}/"
-            f"{unchanged_offset_a_color}/{unchanged_offset_b_color}"
-        )
-        if offset_detection:
-            st.caption(
-                f"オフセット自動検出: 有効 ｜ "
-                f"採用条件①: 一致{offset_detection.min_matches}件以上 かつ "
-                f"形状{offset_detection.min_distinct_shapes}種類以上 ｜ "
-                f"採用条件②（コンパクト救済）: 一致{offset_detection.compact_min_matches}件以上 かつ "
-                f"形状{offset_detection.compact_min_distinct_shapes}種類以上 かつ "
-                f"広がり{offset_detection.compact_max_span}以下 ｜ "
-                f"最大検出数: {offset_detection.max_offsets}個"
-            )
-            st.info(
-                "**オフセット補正の自動検出について**\n\n"
-                "一部の回路ブロックだけが平行移動している場合、その移動量（オフセット）を"
-                "自動的に検出し、A_UNCHANGED_OFFSET（A座標）・B_UNCHANGED_OFFSET（B座標）"
-                "レイヤーとして一致扱いにします。"
-                "補正前から一致している要素はそのまま A_UNCHANGED/B_UNCHANGED に残り、"
-                "A_DELETED・B_ADDED は常にオフセットを適用しない生の座標のまま出力されます。\n\n"
-                "一致件数が少ない移動（記号1個分など）でも、一致した図形が狭い範囲に"
-                "まとまっていれば「コンパクト救済」として採用されます（散在した偶然の"
-                "一致は除外されます）。検出されたオフセットの一覧は比較実行後の結果画面に"
-                "表示されます。\n\n"
-                "閾値未満の候補やオフセット値の傾向を事前に確認したい場合は、"
-                "調査用CLI `analyze_offset.py` を個別に実行してください。"
-            )
-        else:
-            st.caption("オフセット自動検出: 無効（config.py の AUTO_OFFSET_DETECTION）")
-
     if file_pairs_valid:
         try:
             # ファイルが選択されたら処理ボタンを表示
@@ -219,9 +178,6 @@ def app():
                 with st.spinner(f'{len(file_pairs_valid)}ペアのDXFファイルを比較中...'):
                     results = []
                     temp_files_to_cleanup = []
-
-                    # ラベル比較結果を格納するリスト
-                    diff_sheets = []
 
                     for file_a, file_b, pair_name, output_filename in file_pairs_valid:
                         # 一時ファイルに保存
@@ -260,31 +216,6 @@ def app():
                                 True,
                                 entity_counts
                             ))
-
-                            # ラベル比較処理を追加
-                            try:
-                                # ラベルの差分を計算
-                                change_rows, unchanged_entries, _extra_info = compute_label_differences(
-                                    temp_file_b,  # 新ファイル
-                                    temp_file_a,  # 旧ファイル
-                                    tolerance=tolerance,
-                                    ignore_moved_labels=diff_config.IGNORE_MOVED_LABELS,
-                                    new_file_original_name=file_b.name,
-                                )
-                                change_rows = filter_change_rows_by_patterns(change_rows, diff_label_patterns)
-
-                                # シート名を生成（ファイル名から拡張子を除いたもの）
-                                sheet_name = Path(file_b.name).stem
-
-                                # diff_labels用のシートデータ
-                                diff_sheets.append({
-                                    'sheet_name': sheet_name,
-                                    'rows': change_rows,
-                                    'old_label_name': f'Old: {Path(file_a.name).stem}',
-                                    'new_label_name': f'New: {Path(file_b.name).stem}'
-                                })
-                            except Exception as e:
-                                st.warning(f"{pair_name} のラベル比較処理中にエラーが発生しました: {e}")
                         else:
                             results.append((
                                 pair_name,
@@ -296,18 +227,8 @@ def app():
                                 None
                             ))
 
-                    # Excelワークブックを生成
-                    diff_labels_data = None
-
-                    if diff_sheets:
-                        try:
-                            diff_labels_data = build_diff_labels_workbook(diff_sheets)
-                        except Exception as e:
-                            st.warning(f"diff_labels.xlsx の生成中にエラーが発生しました: {e}")
-
                     # 結果をセッション状態に保存
                     st.session_state.processing_results = results
-                    st.session_state.diff_labels_data = diff_labels_data
                     st.session_state.processing_settings = {
                         'added_color': added_color,
                         'deleted_color': deleted_color,
@@ -330,7 +251,6 @@ def app():
         if 'processing_results' in st.session_state and st.session_state.processing_results:
             results = st.session_state.processing_results
             settings = st.session_state.get('processing_settings', {})
-            diff_labels_data = st.session_state.get('diff_labels_data', None)
 
             # 結果サマリーの表示
             successful_pairs = sum(1 for r in results if r[5])
@@ -361,7 +281,7 @@ def app():
 
             # ZIPダウンロードボタン（複数ファイルが成功した場合のみ表示）
             if download_method == "ZIPアーカイブとしてダウンロード" and len(successful_results) > 1:
-                zip_data = create_zip_archive(results, diff_labels_data)
+                zip_data = create_zip_archive(results)
                 st.download_button(
                     label="📦 全ての結果をZIPでダウンロード",
                     data=zip_data,
@@ -392,12 +312,12 @@ def app():
                                 total_a = entity_counts.get('total_a_entities')
                                 total_a_caption = f"（計 {total_a}）" if total_a is not None else ""
                                 st.caption(
-                                    f"📊 A側: 削除 {entity_counts['deleted_entities']} / "
+                                    f" A側: 削除 {entity_counts['deleted_entities']} / "
                                     f"変更なし {entity_counts['unchanged_entities']}"
                                     f"{offset_a_caption}{total_a_caption}"
                                 )
                                 st.caption(
-                                    f"　B側: 追加 {entity_counts['added_entities']} / "
+                                    f" B側: 追加 {entity_counts['added_entities']} / "
                                     f"変更なし {entity_counts['unchanged_entities']}"
                                     f"{offset_b_caption}（計 {entity_counts['total_entities']}）"
                                 )
@@ -439,44 +359,34 @@ def app():
                 elif not success:
                     st.error(f"❌ **{pair_name}**: {file_a_name} ↔ {file_b_name} - 処理に失敗しました")
 
-            # Excelファイルのダウンロードボタンを追加
-            if diff_labels_data:
-                st.write("---")
-                st.subheader("📊 ラベル比較結果 (Excel)")
-
-                st.download_button(
-                    label="📄 diff_labels.xlsx をダウンロード",
-                    data=diff_labels_data,
-                    file_name="diff_labels.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_diff_labels"
-                )
-                st.caption("各ペアのラベル差分を含むExcelファイル")
-
             # 新しい比較を開始するボタン
             if st.button("🔄 新しい比較を開始", key="restart_button"):
                 # セッション状態をクリアして新しい比較を開始
                 for key in list(st.session_state.keys()):
-                    if key in ['processing_results', 'processing_settings', 'diff_labels_data']:
+                    if key in ['processing_results', 'processing_settings']:
                         del st.session_state[key]
                 st.rerun()
             
-            # オプション設定の情報を表示
+            # レイヤー構成の凡例を表示
             if settings:
                 offset_a_color = settings.get('unchanged_offset_a_color', 8)
                 offset_b_color = settings.get('unchanged_offset_b_color', 9)
                 st.info(f"""
-                生成されたDXFファイルは6レイヤー構成です。「A_」で始まるレイヤーだけを表示すると
-                基準ファイル(A)の図面が、「B_」で始まるレイヤーだけを表示すると比較対象ファイル(B)の
-                図面が、それぞれ変更箇所の色分けつきで再現されます：
+                生成されたDXFファイルは7レイヤー構成です。開いた直後は「A_ALL」「B_ALL」の
+                2枚だけが表示され、「A_ALL」で基準ファイル(A)の図面全体が、「B_ALL」で
+                比較対象ファイル(B)の図面全体が、それぞれ変更箇所の色分けつきで再現されます
+                （複数レイヤーを選択する手間を無くすための合成レイヤーです）。
+                以下のカテゴリ別レイヤーは既定では非表示で、詳細を確認したいときに
+                手動でONにできます：
                 - A_DELETED (色{settings.get('deleted_color', 6)}): 基準ファイル(A)にのみ存在する要素
                 - B_ADDED (色{settings.get('added_color', 4)}): 比較対象ファイル(B)にのみ存在する要素
-                - A_UNCHANGED / B_UNCHANGED (色{settings.get('unchanged_color', 7)}): 両方のファイルに
-                  存在し変更がない要素（同一座標）
+                - UNCHANGED (色{settings.get('unchanged_color', 7)}): 両方のファイルに
+                  存在し変更がない要素（A/Bで内容が同一のため1レイヤーに統合）
                 - A_UNCHANGED_OFFSET (色{offset_a_color}) / B_UNCHANGED_OFFSET (色{offset_b_color}):
                   自動検出されたオフセットで一致した要素（検出0件のペアでは生成されません。それぞれ
                   基準ファイル(A)・比較対象ファイル(B)の座標で描画。検出内容は各ペアの
                   「🔍 検出されたオフセット」から確認できます）
+                - A_ALL / B_ALL: 上記のうちファイルA/Bの再現に必要なものを1枚に複製した合成レイヤー
                 """)
     else:
         st.warning("少なくとも1つのファイルペア（基準DXFファイル、比較対象DXFファイル）を登録してください。")

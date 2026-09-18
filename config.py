@@ -10,19 +10,7 @@ DXF Visual Diff - 設定ファイル
 class DiffConfig:
     """差分比較関連の設定"""
 
-    # ── 差分抽出オプション（旧: 「オプション設定」。2026-09 にUIから移行）──
-
-    # 移動しただけのラベルを差分から除外する
-    #   回路ブロックをまるごと別の位置に移動すると、座標単位の比較では
-    #   「削除＋追加」として検出されます。同一ラベルの削除件数と追加件数が
-    #   一致する分は、座標が異なっていても diff_labels.xlsx の変更候補から
-    #   除外し、変更なしとして扱います（差分DXFのエンティティ比較には
-    #   影響しません）。「☆」を含むラベルは対象外（常に変更候補として残ります）。
-    #
-    #   注意: 座標を見ず件数だけで判定するため、たまたま同じラベル名の部品が
-    #   別の場所で削除・別の無関係な場所に追加された場合も「移動」とみなされ、
-    #   見た目上区別できなくなります。
-    IGNORE_MOVED_LABELS = False
+    # ── 差分抽出オプション ──
 
     # 色だけが異なる図形は変更なし扱いにする
     #   ※ この項目は utils/compare_dxf.py の ignore_color 対応が必要なため、
@@ -38,16 +26,17 @@ class DiffConfig:
     # レイヤー色設定（AutoCADカラーインデックス）
     #   1=赤 / 2=黄 / 3=緑 / 4=シアン / 5=青 / 6=マゼンタ / 7=白・黒 / 8=灰 / 9=明灰
     #
-    #   2026-09-18、差分DXFを6レイヤー構成（A_*/B_* 接頭辞）に変更。旧
-    #   DELETED/ADDED/UNCHANGED/UNCHANGED_OFFSET の4レイヤーは廃止し、
-    #   「A_*をすべてONにすればファイルAの全図形が色の区別つきで再現できる」
-    #   「B_*をすべてONにすればファイルBの全図形が色の区別つきで再現できる」
+    #   2026-09-18、差分DXFを7レイヤー構成に変更。外部CADソフトでの閲覧を
+    #   前提に、内容が同一のA_UNCHANGED/B_UNCHANGEDをUNCHANGED1枚へ統合し、
+    #   代わりに合成レイヤーA_ALL/B_ALL（詳細カテゴリ層の物理複製）を新設した。
+    #   「A_ALLを1枚ONにすればファイルAの全図形が色の区別つきで再現できる」
+    #   「B_ALLを1枚ONにすればファイルBの全図形が色の区別つきで再現できる」
     #   ようにした。DXFの色はレイヤー属性ではなくエンティティ属性として
     #   各図形に直接書き込まれるため、1レイヤーに複数カテゴリが混在しても
     #   色による区別は失われない。
     DEFAULT_DELETED_COLOR = 6           # A_DELETED（削除図形。基準ファイルAのみに存在）
     DEFAULT_ADDED_COLOR = 4             # B_ADDED（追加図形。比較対象ファイルBのみに存在）
-    DEFAULT_UNCHANGED_COLOR = 7         # A_UNCHANGED / B_UNCHANGED（変更なし図形。同一座標）
+    DEFAULT_UNCHANGED_COLOR = 7         # UNCHANGED（変更なし図形。A/B共通1レイヤー）
     DEFAULT_UNCHANGED_OFFSET_A_COLOR = 8  # A_UNCHANGED_OFFSET（オフセット一致・A側旧位置。濃灰）
     DEFAULT_UNCHANGED_OFFSET_B_COLOR = 9  # B_UNCHANGED_OFFSET（オフセット一致・B側新位置。明灰）
 
@@ -116,27 +105,5 @@ class DiffConfig:
     AUTO_OFFSET_COMPACT_MAX_SPAN = 15.0
 
 
-class LabelFilterConfig:
-    """差分抽出するラベルの絞り込み設定"""
-
-    # 差分抽出するラベルの先頭文字列（正規表現・複数指定可）
-    #   ここに書いた正規表現のいずれかに「先頭から」一致するラベルだけを
-    #   diff_labels.xlsx の差分（変更候補）として出力します。
-    #   旧ラベル・新ラベルのどちらかが一致すればその行は残ります。
-    #
-    #   空リスト（既定）の場合はフィルタをかけず、すべてのラベルが
-    #   差分抽出の対象になります。
-    #
-    #   差分DXF（図形の ADDED/DELETED/UNCHANGED 判定）には影響しません。
-    #
-    #   記述例:
-    #     DIFF_LABEL_PREFIX_PATTERNS = [
-    #         r"W No\.",          # 「W No.」で始まるラベル
-    #         r"[A-Z]{1,3}\d+",   # 機器符号らしいラベル（R10, CB001 など）
-    #     ]
-    DIFF_LABEL_PREFIX_PATTERNS = []
-
-
 # 設定クラスのインスタンスを作成（簡単にアクセスできるように）
 diff_config = DiffConfig()
-label_filter_config = LabelFilterConfig()

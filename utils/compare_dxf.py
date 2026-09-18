@@ -813,13 +813,16 @@ class DiffAnalyzer:
 class LayerConfig:
     """レイヤー設定クラス
 
-    2026-09-18、6レイヤー構成（A_*/B_* 接頭辞）に変更。旧
-    DELETED/ADDED/UNCHANGED/UNCHANGED_OFFSET の4レイヤーは廃止した。
-    「A_* を全部ONにすればファイルAの全図形が色の区別つきで再現される」
-    「B_* を全部ONにすればファイルBの全図形が色の区別つきで再現される」
-    ことを狙いとする（DXFの色はレイヤー属性ではなくエンティティ属性として
-    各図形に直接書き込まれるため、1レイヤーに複数カテゴリが混在しても
-    色による区別は失われない）。
+    2026-09-18、7レイヤー構成に変更（6レイヤー構成からの2回目の変更。
+    外部CADソフトでの閲覧を前提に、A_UNCHANGED/B_UNCHANGED を内容が同一のため
+    UNCHANGED 1枚へ統合し、代わりに「1回のレイヤー選択でファイルA/Bの全体が
+    見える」ための合成レイヤー A_ALL/B_ALL を新設した。外部CADのレイヤーパネルは
+    複数レイヤーの一括ON/OFFを前提にできないため、詳細カテゴリ層とは別に
+    「これ1枚をONにすればよい」層を物理的に複製して持たせる。
+    DXFの色はレイヤー属性ではなくエンティティ属性として各図形に直接書き込まれる
+    ため（`create_entity_from_absolute()` が `dxfattribs['color']` を設定）、
+    A_ALL/B_ALLのように1レイヤーに複数カテゴリが混在しても色による区別は
+    失われない。
     """
 
     def __init__(self, deleted_color: int = 6, added_color: int = 4, unchanged_color: int = 7,
@@ -835,15 +838,10 @@ class LayerConfig:
                 'color': added_color,  # デフォルト: シアン
                 'description': 'Entities present in file B but not in file A (file B coordinates)'
             },
-            'A_UNCHANGED': {
-                'name': 'A_UNCHANGED',
+            'UNCHANGED': {
+                'name': 'UNCHANGED',
                 'color': unchanged_color,  # デフォルト: 白/黒
-                'description': 'Entities present in both files, drawn from file A instances'
-            },
-            'B_UNCHANGED': {
-                'name': 'B_UNCHANGED',
-                'color': unchanged_color,  # デフォルト: 白/黒（A_UNCHANGEDと同色。座標も同一）
-                'description': 'Entities present in both files, drawn from file B instances'
+                'description': 'Entities present in both files (single copy; content is identical regardless of source file)'
             },
             'A_UNCHANGED_OFFSET': {
                 'name': 'A_UNCHANGED_OFFSET',
@@ -854,6 +852,16 @@ class LayerConfig:
                 'name': 'B_UNCHANGED_OFFSET',
                 'color': unchanged_offset_b_color,  # デフォルト: 明灰
                 'description': 'Entities matched after offset compensation (drawn at file B coordinates)'
+            },
+            'A_ALL': {
+                'name': 'A_ALL',
+                'color': unchanged_color,  # レイヤー自体の色は使われない（各エンティティが自分の色を持つ）
+                'description': 'Composite layer reproducing file A in full (A_DELETED + UNCHANGED + A_UNCHANGED_OFFSET, duplicated)'
+            },
+            'B_ALL': {
+                'name': 'B_ALL',
+                'color': unchanged_color,  # レイヤー自体の色は使われない（各エンティティが自分の色を持つ）
+                'description': 'Composite layer reproducing file B in full (B_ADDED + UNCHANGED + B_UNCHANGED_OFFSET, duplicated)'
             }
         }
 
@@ -1052,17 +1060,18 @@ class OutputGenerator:
                         common_hashes: Set[str], output_file: str,
                         unchanged_offset_a_hashes: Optional[Set[str]] = None,
                         unchanged_offset_b_hashes: Optional[Set[str]] = None):
-        """差分DXFファイルを作成（6レイヤー構成、2026-09-18）
+        """差分DXFファイルを作成（7レイヤー構成、2026-09-18）
 
-        A_* レイヤー群（A_DELETED/A_UNCHANGED/A_UNCHANGED_OFFSET）を全部ONにすると
-        ファイルAの全図形が色の区別つきで再現され、B_* レイヤー群を全部ONにすると
-        ファイルBの全図形が再現される。A_UNCHANGED/B_UNCHANGED はそれぞれ
-        entities_a/entities_b の実体から描画する（座標は一致するが、由来を分ける）。
+        A_ALL を1枚ONにするとファイルAの全図形が色の区別つきで再現され、
+        B_ALL を1枚ONにするとファイルBの全図形が再現される（外部CADソフトで
+        レイヤーを複数選択せずに済むよう、詳細カテゴリ層とは別に持つ物理複製）。
+        UNCHANGED は entities_a の実体から1回だけ描画する（A/Bどちらの由来かは
+        座標が同一のため区別する意味がなく、旧A_UNCHANGED/B_UNCHANGED統合)。
 
         Args:
             unchanged_offset_a_hashes: オフセット一致したA側ハッシュ集合。
                 呼び出し側で common_hashes を除外済みであること（そうしないと
-                A_UNCHANGED と二重描画になる。matched_a_hashes は common_hashes と
+                UNCHANGED と二重描画になる。matched_a_hashes は common_hashes と
                 重なりうる——B側は unmatched_b 由来のため構造上重ならないのに対し、
                 A側は「未一致B要素を平行移動した先」が common な A要素の位置と
                 偶然一致することがあるため）。
@@ -1075,7 +1084,7 @@ class OutputGenerator:
 
             # レイヤーを作成
             layers = new_doc.layers
-            diff_types = ['A_DELETED', 'B_ADDED', 'A_UNCHANGED', 'B_UNCHANGED']
+            diff_types = ['A_DELETED', 'B_ADDED', 'UNCHANGED', 'A_ALL', 'B_ALL']
             # UNCHANGED_OFFSET系はオフセット補正で使われた場合のみレイヤーを作る
             # （オフセット未使用時に空レイヤーを増やさないため。A側・B側は常に対で
             # 作る/作らないを揃える）
@@ -1087,77 +1096,73 @@ class OutputGenerator:
                 layer_color = self.layer_config.get_layer_color(diff_type)
                 layer = layers.new(layer_name)
                 layer.color = layer_color
+                # A_ALL/B_ALL以外は既定で非表示にする（外部CADで開いた直後は
+                # 合成レイヤーだけが見え、詳細カテゴリ層はユーザーが必要に応じて
+                # 手動でONにする運用。エンティティ自身の色は変えないため、ONに
+                # すればいつでも元の色分け表示に戻る）
+                if diff_type not in ('A_ALL', 'B_ALL'):
+                    layer.off()
 
-            # A_DELETED エンティティを追加
-            layer_name = self.layer_config.get_layer_name('A_DELETED')
-            layer_color = self.layer_config.get_layer_color('A_DELETED')
+            a_all_layer = self.layer_config.get_layer_name('A_ALL')
+            b_all_layer = self.layer_config.get_layer_name('B_ALL')
 
-            for entity_hash in deleted_hashes:
-                if entity_hash in entities_a:
-                    for location, virtual_entity in entities_a[entity_hash]:
-                        absolute_entity = virtual_entity['absolute_entity']
-                        self.create_entity_from_absolute(absolute_entity, msp, layer_name, layer_color)
-                        break  # 最初のインスタンスのみ
+            def _write(hashes, entities_source, layer_name, layer_color, composite_layer=None):
+                """指定ハッシュ集合のエンティティを layer_name に描画する。
+                composite_layer 指定時は同じ色のまま A_ALL/B_ALL にも複製する
+                （物理複製。図形自身が色を持つため合成層内でもカテゴリ別の
+                色分けは保たれる）。"""
+                for entity_hash in hashes:
+                    if entity_hash in entities_source:
+                        for location, virtual_entity in entities_source[entity_hash]:
+                            absolute_entity = virtual_entity['absolute_entity']
+                            self.create_entity_from_absolute(absolute_entity, msp, layer_name, layer_color)
+                            if composite_layer:
+                                self.create_entity_from_absolute(absolute_entity, msp, composite_layer, layer_color)
+                            break  # 最初のインスタンスのみ
 
-            # B_ADDED エンティティを追加
-            layer_name = self.layer_config.get_layer_name('B_ADDED')
-            layer_color = self.layer_config.get_layer_color('B_ADDED')
+            # A_DELETED エンティティを追加（A_ALLにも複製）
+            _write(deleted_hashes, entities_a,
+                   self.layer_config.get_layer_name('A_DELETED'),
+                   self.layer_config.get_layer_color('A_DELETED'),
+                   composite_layer=a_all_layer)
 
-            for entity_hash in added_hashes:
-                if entity_hash in entities_b:
-                    for location, virtual_entity in entities_b[entity_hash]:
-                        absolute_entity = virtual_entity['absolute_entity']
-                        self.create_entity_from_absolute(absolute_entity, msp, layer_name, layer_color)
-                        break  # 最初のインスタンスのみ
+            # B_ADDED エンティティを追加（B_ALLにも複製）
+            _write(added_hashes, entities_b,
+                   self.layer_config.get_layer_name('B_ADDED'),
+                   self.layer_config.get_layer_color('B_ADDED'),
+                   composite_layer=b_all_layer)
 
-            # A_UNCHANGED エンティティを追加（entities_a の実体から）
-            layer_name = self.layer_config.get_layer_name('A_UNCHANGED')
-            layer_color = self.layer_config.get_layer_color('A_UNCHANGED')
+            # UNCHANGED エンティティを追加（entities_a の実体から1回だけ描画。
+            # A/B両方の座標が一致するため由来を分ける意味がなく、旧
+            # A_UNCHANGED/B_UNCHANGEDを統合した。A_ALL・B_ALL の両方に複製する
+            # ことで、どちらの合成層にも過不足なく含まれる）
+            layer_name = self.layer_config.get_layer_name('UNCHANGED')
+            layer_color = self.layer_config.get_layer_color('UNCHANGED')
 
             for entity_hash in common_hashes:
                 if entity_hash in entities_a:
                     for location, virtual_entity in entities_a[entity_hash]:
                         absolute_entity = virtual_entity['absolute_entity']
                         self.create_entity_from_absolute(absolute_entity, msp, layer_name, layer_color)
+                        self.create_entity_from_absolute(absolute_entity, msp, a_all_layer, layer_color)
+                        self.create_entity_from_absolute(absolute_entity, msp, b_all_layer, layer_color)
                         break  # 最初のインスタンスのみ
 
-            # B_UNCHANGED エンティティを追加（entities_b の実体から。座標はA側と一致するが
-            # 由来のファイルを分けることで B_* レイヤー群だけでファイルBが完全に再現できる）
-            layer_name = self.layer_config.get_layer_name('B_UNCHANGED')
-            layer_color = self.layer_config.get_layer_color('B_UNCHANGED')
-
-            for entity_hash in common_hashes:
-                if entity_hash in entities_b:
-                    for location, virtual_entity in entities_b[entity_hash]:
-                        absolute_entity = virtual_entity['absolute_entity']
-                        self.create_entity_from_absolute(absolute_entity, msp, layer_name, layer_color)
-                        break  # 最初のインスタンスのみ
-
-            # A_UNCHANGED_OFFSET エンティティを追加
+            # A_UNCHANGED_OFFSET エンティティを追加（A_ALLにも複製）
             # （オフセット補正で初めて一致した要素。file A の座標で描画する）
             if unchanged_offset_a_hashes:
-                layer_name = self.layer_config.get_layer_name('A_UNCHANGED_OFFSET')
-                layer_color = self.layer_config.get_layer_color('A_UNCHANGED_OFFSET')
+                _write(unchanged_offset_a_hashes, entities_a,
+                       self.layer_config.get_layer_name('A_UNCHANGED_OFFSET'),
+                       self.layer_config.get_layer_color('A_UNCHANGED_OFFSET'),
+                       composite_layer=a_all_layer)
 
-                for entity_hash in unchanged_offset_a_hashes:
-                    if entity_hash in entities_a:
-                        for location, virtual_entity in entities_a[entity_hash]:
-                            absolute_entity = virtual_entity['absolute_entity']
-                            self.create_entity_from_absolute(absolute_entity, msp, layer_name, layer_color)
-                            break  # 最初のインスタンスのみ
-
-            # B_UNCHANGED_OFFSET エンティティを追加
+            # B_UNCHANGED_OFFSET エンティティを追加（B_ALLにも複製）
             # （オフセット補正で初めて一致した要素。file B の座標で描画する）
             if unchanged_offset_b_hashes:
-                layer_name = self.layer_config.get_layer_name('B_UNCHANGED_OFFSET')
-                layer_color = self.layer_config.get_layer_color('B_UNCHANGED_OFFSET')
-
-                for entity_hash in unchanged_offset_b_hashes:
-                    if entity_hash in entities_b:
-                        for location, virtual_entity in entities_b[entity_hash]:
-                            absolute_entity = virtual_entity['absolute_entity']
-                            self.create_entity_from_absolute(absolute_entity, msp, layer_name, layer_color)
-                            break  # 最初のインスタンスのみ
+                _write(unchanged_offset_b_hashes, entities_b,
+                       self.layer_config.get_layer_name('B_UNCHANGED_OFFSET'),
+                       self.layer_config.get_layer_color('B_UNCHANGED_OFFSET'),
+                       composite_layer=b_all_layer)
 
             # DXFファイルを保存（UTF-8エンコーディングで日本語テキストを保持）
             new_doc.saveas(output_file)
@@ -1183,13 +1188,14 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
     """
     DXFファイル比較メイン処理（Streamlit用インターフェース）
 
-    2026-09-18、出力を6レイヤー構成（A_*/B_* 接頭辞）に変更した。
-    A_* レイヤー群（A_DELETED/A_UNCHANGED/A_UNCHANGED_OFFSET）を全部ONにすると
-    ファイルAの全図形が色の区別つきで再現され、B_* レイヤー群を全部ONにすると
-    ファイルBの全図形が再現される。
+    2026-09-18、出力を7レイヤー構成に変更した（6レイヤー構成からの2回目の
+    変更）。A_ALL レイヤーを1枚ONにするとファイルAの全図形が色の区別つきで
+    再現され、B_ALL を1枚ONにするとファイルBの全図形が再現される
+    （外部CADソフトでレイヤーを複数選択する手間を無くすための物理複製）。
+    A_UNCHANGED/B_UNCHANGED は内容が同一のため UNCHANGED 1枚に統合した。
 
-    オフセット補正は和集合型: 補正なしで一致した要素は従来どおり A_UNCHANGED/
-    B_UNCHANGED のまま残り、補正して初めて一致した要素だけが
+    オフセット補正は和集合型: 補正なしで一致した要素は従来どおり UNCHANGED の
+    まま残り、補正して初めて一致した要素だけが
     A_UNCHANGED_OFFSET（file A座標）・B_UNCHANGED_OFFSET（file B座標）に
     追加される。ファイルBは常に生の座標で展開されるため、
     A_DELETED/B_ADDED の座標にオフセットは適用されない。
@@ -1207,7 +1213,7 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         tolerance: 座標許容誤差
         deleted_color: A_DELETEDエンティティの色（デフォルト: 6=マゼンタ）
         added_color: B_ADDEDエンティティの色（デフォルト: 4=シアン）
-        unchanged_color: A_UNCHANGED/B_UNCHANGEDエンティティの色（デフォルト: 7=白/黒）
+        unchanged_color: UNCHANGEDエンティティの色（デフォルト: 7=白/黒）
         unchanged_offset_a_color: A_UNCHANGED_OFFSETエンティティの色（デフォルト: 8=濃灰）
         unchanged_offset_b_color: B_UNCHANGED_OFFSETエンティティの色（デフォルト: 9=明灰）
         offset_b: ファイルBとの一致判定に使うオフセット (dx, dy) のタプル (オプション)。
@@ -1222,7 +1228,7 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
                 - deleted_entities: A_DELETEDエンティティ数
                 - added_entities: B_ADDEDエンティティ数
                 - unchanged_entities: 変更なしエンティティ数（オフセット無しで一致。
-                  A_UNCHANGED/B_UNCHANGED共通の件数）
+                  UNCHANGEDレイヤーの件数）
                 - unchanged_offset_entities: B_UNCHANGED_OFFSETエンティティ数
                   （offset_b・offset_detection 両方の一致分を合算。旧仕様との
                   互換のためキー名は変更していない）
@@ -1231,8 +1237,8 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
                   1つのA図形に対応することがあるため。バグではない）
                 - diff_entities: 差分エンティティ数（削除+追加）
                 - total_entities: 総エンティティ数（unchanged_offset_entities を含む。
-                  ≒ B_* レイヤー群の合計）
-                - total_a_entities: A_* レイヤー群の合計（2026-09-18新設。
+                  ≒ B_ALLレイヤーの件数）
+                - total_a_entities: A_ALLレイヤーの件数に一致する合計（2026-09-18新設。
                   = deleted_entities + unchanged_entities + unchanged_offset_a_entities。
                   ファイルAの全図形数に一致する）
                 - detected_offsets: 自動検出で採用されたオフセットのリスト
@@ -1335,7 +1341,7 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         # matched_a_hashes_by_offset は common_hashes と重なりうる——B側は
         # unmatched_b 由来のため構造上重ならないのに対し、A側は「未一致B要素を
         # 平行移動した先」が common な A要素の位置と偶然一致することがある
-        # （実データで4件・23件の重複を確認）。除外しないと A_UNCHANGED と
+        # （実データで4件・23件の重複を確認）。除外しないと UNCHANGED と
         # A_UNCHANGED_OFFSET に同じ図形が二重に描かれる。
         unchanged_offset_a_hashes = matched_a_hashes_by_offset - common_hashes
 
