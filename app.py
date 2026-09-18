@@ -23,15 +23,20 @@ st.set_page_config(
     layout="wide",
 )
 
-def generate_output_filename(file_a_name, file_b_name):
+def generate_output_filename(file_new_name, file_old_name):
     """
-    出力ファイル名を生成: (A filename)_vs_(B filename).dxf
+    出力ファイル名を生成: (NEW filename)_vs_(OLD filename).dxf
+
+    NEW=流用先（新図面）、OLD=流用元（旧図面）。DXF-diff-manager の出力命名
+    （{流用先}_vs_{流用元}.dxf）と揃えている（2026-09-18、A/B → OLD/NEW への
+    リネームに伴い、ファイル名の順序も NEW_vs_OLD に変更。以前は
+    A_vs_B（基準ファイルが先）だったため、他プロジェクトと順序が逆だった）。
     """
     # 拡張子を除いた基本ファイル名を取得
-    file_a_base = Path(file_a_name).stem
-    file_b_base = Path(file_b_name).stem
+    file_new_base = Path(file_new_name).stem
+    file_old_base = Path(file_old_name).stem
 
-    return f"{file_a_base}_vs_{file_b_base}.dxf"
+    return f"{file_new_base}_vs_{file_old_base}.dxf"
 
 def create_zip_archive(results):
     """
@@ -40,7 +45,7 @@ def create_zip_archive(results):
     zip_buffer = BytesIO()
 
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        for pair_name, file_a_name, file_b_name, output_filename, dxf_data, success, _ in results:
+        for pair_name, file_new_name, file_old_name, output_filename, dxf_data, success, _ in results:
             if success and dxf_data:
                 # ZIPファイル内のファイル名を設定
                 zip_file.writestr(output_filename, dxf_data)
@@ -51,7 +56,7 @@ def create_zip_archive(results):
 def app():
     st.title('DXF Visual Diff Analyzer')
     st.write('複数のDXFファイルペアを比較し、差分をDXFフォーマットで出力します。')
-    
+
     # プログラム説明
     with st.expander("ℹ️ プログラム説明", expanded=False):
         help_text = [
@@ -62,66 +67,69 @@ def app():
             "2. 「DXF差分を比較」ボタンをクリックして処理を実行します",
             "",
             "**出力DXFファイルの内容（7レイヤー構成）：**",
-            "外部CADソフトで開いた直後は「A_ALL」「B_ALL」の2枚だけが表示された状態になり、"
-            "「A_ALL」で基準ファイル(A)の図面全体が、「B_ALL」で比較対象ファイル(B)の図面全体が、"
+            "外部CADソフトで開いた直後は「NEW_ALL」「OLD_ALL」の2枚だけが表示された状態になり、"
+            "「NEW_ALL」で流用先ファイル(NEW)の図面全体が、「OLD_ALL」で流用元ファイル(OLD)の図面全体が、"
             "それぞれ変更箇所の色分けつきで再現されます"
             "（複数レイヤーを選択する手間を無くすための合成レイヤーです）。"
             "詳細を個別に確認したい場合は、以下のカテゴリ別レイヤー（既定では非表示）を"
             "手動でONにしてください。",
-            "- A_DELETED (デフォルト色: マゼンタ): 基準ファイル(A)にのみ存在する要素",
-            "- B_ADDED (デフォルト色: シアン): 比較対象ファイル(B)にのみ存在する要素",
+            "- NEW_ADDED (デフォルト色: シアン): 流用先ファイル(NEW)にのみ存在する要素",
+            "- OLD_DELETED (デフォルト色: マゼンタ): 流用元ファイル(OLD)にのみ存在する要素",
             "- UNCHANGED (デフォルト色: 白/黒): 両方のファイルに存在し変更がない要素"
-            "（A/Bで内容が同一のため1レイヤーに統合しています）",
-            "- A_UNCHANGED_OFFSET (デフォルト色: 濃灰) / B_UNCHANGED_OFFSET (デフォルト色: 明灰): "
+            "（OLD/NEWで内容が同一のため1レイヤーに統合しています）",
+            "- OLD_UNCHANGED_OFFSET (デフォルト色: 濃灰) / NEW_UNCHANGED_OFFSET (デフォルト色: 明灰): "
             "一部の図形だけが平行移動している場合に、その移動量（オフセット）を自動検出して"
-            "一致とみなした要素（それぞれ基準ファイル(A)・比較対象ファイル(B)の座標で描画。"
+            "一致とみなした要素（それぞれ流用元ファイル(OLD)・流用先ファイル(NEW)の座標で描画。"
             "検出されたオフセットは結果画面に一覧表示されます）",
-            "- A_ALL / B_ALL: 上記カテゴリ別レイヤーのうち、それぞれファイルA/Bの再現に"
-            "必要なもの（A_ALL = A_DELETED + UNCHANGED + A_UNCHANGED_OFFSET、"
-            "B_ALL = B_ADDED + UNCHANGED + B_UNCHANGED_OFFSET）を1枚に複製した合成レイヤー"
+            "- OLD_ALL / NEW_ALL: 上記カテゴリ別レイヤーのうち、それぞれファイルOLD/NEWの再現に"
+            "必要なもの（OLD_ALL = OLD_DELETED + UNCHANGED + OLD_UNCHANGED_OFFSET、"
+            "NEW_ALL = NEW_ADDED + UNCHANGED + NEW_UNCHANGED_OFFSET）を1枚に複製した合成レイヤー"
         ]
-        
+
         st.info("\n".join(help_text))
-    
+
     # ファイルペア登録UI
     st.subheader("ファイルペア登録")
     st.write("最大5ペアのDXFファイルを登録できます")
-    
+
     # セッション状態の初期化
+    # （2026-09-18、A/B → OLD/NEW リネームに伴い session_state キーも変更。
+    # 左のボックスに流用先(NEW)、右のボックスに流用元(OLD)を配置する
+    # ——出力ファイル名 {NEW}_vs_{OLD}.dxf の左から右の並びと視覚的に揃える）
     if 'file_pairs' not in st.session_state:
         st.session_state.file_pairs = []
         for i in range(5):  # 最大5ペア
             st.session_state.file_pairs.append({
-                'fileA': None,
-                'fileB': None,
+                'fileNew': None,
+                'fileOld': None,
                 'name': f"Pair{i+1}"
             })
-    
+
     # 各ペアの入力フォーム
     file_pairs_valid = []
-    
+
     for i in range(5):  # 最大5ペア
         with st.expander(f"ファイルペア {i+1}", expanded=i==0):
             col1, col2, col3 = st.columns([2, 2, 1])
-            
+
             with col1:
-                uploaded_file_a = st.file_uploader(
-                    f"基準DXFファイル (A) {i+1}", 
-                    type="dxf", 
-                    key=f"dxf_a_{i}"
+                uploaded_file_new = st.file_uploader(
+                    f"流用先DXFファイル (NEW) {i+1}",
+                    type="dxf",
+                    key=f"dxf_new_{i}"
                 )
-                if uploaded_file_a:
-                    st.session_state.file_pairs[i]['fileA'] = uploaded_file_a
-                
+                if uploaded_file_new:
+                    st.session_state.file_pairs[i]['fileNew'] = uploaded_file_new
+
             with col2:
-                uploaded_file_b = st.file_uploader(
-                    f"比較対象DXFファイル (B) {i+1}", 
-                    type="dxf", 
-                    key=f"dxf_b_{i}"
+                uploaded_file_old = st.file_uploader(
+                    f"流用元DXFファイル (OLD) {i+1}",
+                    type="dxf",
+                    key=f"dxf_old_{i}"
                 )
-                if uploaded_file_b:
-                    st.session_state.file_pairs[i]['fileB'] = uploaded_file_b
-            
+                if uploaded_file_old:
+                    st.session_state.file_pairs[i]['fileOld'] = uploaded_file_old
+
             with col3:
                 pair_name = st.text_input(
                     "ペア名",
@@ -129,32 +137,32 @@ def app():
                     key=f"pair_name_{i}"
                 )
                 st.session_state.file_pairs[i]['name'] = pair_name
-            
+
             # 両方のファイルが選択されている場合、有効なペアとして追加
-            if st.session_state.file_pairs[i]['fileA'] and st.session_state.file_pairs[i]['fileB']:
+            if st.session_state.file_pairs[i]['fileNew'] and st.session_state.file_pairs[i]['fileOld']:
                 output_filename = generate_output_filename(
-                    st.session_state.file_pairs[i]['fileA'].name,
-                    st.session_state.file_pairs[i]['fileB'].name
+                    st.session_state.file_pairs[i]['fileNew'].name,
+                    st.session_state.file_pairs[i]['fileOld'].name
                 )
-                
+
                 file_pairs_valid.append((
-                    st.session_state.file_pairs[i]['fileA'],
-                    st.session_state.file_pairs[i]['fileB'],
+                    st.session_state.file_pairs[i]['fileNew'],
+                    st.session_state.file_pairs[i]['fileOld'],
                     st.session_state.file_pairs[i]['name'],
                     output_filename
                 ))
-                
+
                 # プレビュー表示
-                st.success(f"Pair{i+1}: {st.session_state.file_pairs[i]['fileA'].name} と {st.session_state.file_pairs[i]['fileB'].name} を比較")
+                st.success(f"Pair{i+1}: {st.session_state.file_pairs[i]['fileNew'].name} と {st.session_state.file_pairs[i]['fileOld'].name} を比較")
                 st.info(f"出力ファイル名: {output_filename}")
-    
+
     # 設定値はconfig.pyから取得（管理者用。UIには表示しない）
     tolerance = diff_config.DEFAULT_TOLERANCE
     deleted_color = diff_config.DEFAULT_DELETED_COLOR
     added_color = diff_config.DEFAULT_ADDED_COLOR
     unchanged_color = diff_config.DEFAULT_UNCHANGED_COLOR
-    unchanged_offset_a_color = diff_config.DEFAULT_UNCHANGED_OFFSET_A_COLOR
-    unchanged_offset_b_color = diff_config.DEFAULT_UNCHANGED_OFFSET_B_COLOR
+    unchanged_offset_old_color = diff_config.DEFAULT_UNCHANGED_OFFSET_OLD_COLOR
+    unchanged_offset_new_color = diff_config.DEFAULT_UNCHANGED_OFFSET_NEW_COLOR
 
     # オフセット補正の自動検出設定（2026-09-17新設。手動の「オフセット補正設定」UIは廃止）
     offset_detection = None
@@ -179,26 +187,32 @@ def app():
                     results = []
                     temp_files_to_cleanup = []
 
-                    for file_a, file_b, pair_name, output_filename in file_pairs_valid:
+                    for file_new, file_old, pair_name, output_filename in file_pairs_valid:
                         # 一時ファイルに保存
-                        temp_file_a = save_uploadedfile(file_a)
-                        temp_file_b = save_uploadedfile(file_b)
+                        temp_file_new = save_uploadedfile(file_new)
+                        temp_file_old = save_uploadedfile(file_old)
                         temp_output = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf").name
 
-                        temp_files_to_cleanup.extend([temp_file_a, temp_file_b, temp_output])
+                        temp_files_to_cleanup.extend([temp_file_new, temp_file_old, temp_output])
 
                         # DXF比較処理（オフセット補正は自動検出。config.py の
                         # AUTO_OFFSET_DETECTION で無効化しない限り常に適用される）
+                        # ⚠️ compare_dxf_files_and_generate_dxf() は
+                        # (file_old, file_new, ...) の順で渡す（OLDが第1引数）。
+                        # UI 上は NEW を左に配置しているが、引数の意味は変えない
+                        # ——ここを取り違えると OLD_DELETED/NEW_ADDED の中身が
+                        # 入れ替わる（2026-07 に DXF-diff-manager で実際に
+                        # 発生した新旧逆転の不具合と同種）。
                         success, entity_counts = compare_dxf_files_and_generate_dxf(
-                            temp_file_a,
-                            temp_file_b,
+                            temp_file_old,
+                            temp_file_new,
                             temp_output,
                             tolerance=tolerance,
                             deleted_color=deleted_color,
                             added_color=added_color,
                             unchanged_color=unchanged_color,
-                            unchanged_offset_a_color=unchanged_offset_a_color,
-                            unchanged_offset_b_color=unchanged_offset_b_color,
+                            unchanged_offset_old_color=unchanged_offset_old_color,
+                            unchanged_offset_new_color=unchanged_offset_new_color,
                             offset_detection=offset_detection
                         )
 
@@ -209,8 +223,8 @@ def app():
 
                             results.append((
                                 pair_name,
-                                file_a.name,
-                                file_b.name,
+                                file_new.name,
+                                file_old.name,
                                 output_filename,
                                 dxf_data,
                                 True,
@@ -219,8 +233,8 @@ def app():
                         else:
                             results.append((
                                 pair_name,
-                                file_a.name,
-                                file_b.name,
+                                file_new.name,
+                                file_old.name,
                                 output_filename,
                                 None,
                                 False,
@@ -233,20 +247,20 @@ def app():
                         'added_color': added_color,
                         'deleted_color': deleted_color,
                         'unchanged_color': unchanged_color,
-                        'unchanged_offset_a_color': unchanged_offset_a_color,
-                        'unchanged_offset_b_color': unchanged_offset_b_color
+                        'unchanged_offset_old_color': unchanged_offset_old_color,
+                        'unchanged_offset_new_color': unchanged_offset_new_color
                     }
-                
+
                 # 一時ファイルの削除
                 for temp_file in temp_files_to_cleanup:
                     try:
                         os.unlink(temp_file)
                     except:
                         pass
-        
+
         except Exception as e:
             handle_error(e)
-        
+
         # セッション状態に保存された結果を表示
         if 'processing_results' in st.session_state and st.session_state.processing_results:
             results = st.session_state.processing_results
@@ -255,14 +269,14 @@ def app():
             # 結果サマリーの表示
             successful_pairs = sum(1 for r in results if r[5])
             total_pairs = len(results)
-            
+
             if successful_pairs == total_pairs:
                 st.success(f"全{total_pairs}ペアのDXF比較が完了しました")
             elif successful_pairs > 0:
                 st.warning(f"{successful_pairs}/{total_pairs}ペアのDXF比較が完了しました。一部のペアで処理に失敗しました。")
             else:
                 st.error("全てのペアで処理に失敗しました")
-            
+
             # ダウンロード方法の選択
             st.subheader("差分解析結果")
 
@@ -293,33 +307,33 @@ def app():
                 st.write("---")
 
             # 個別ダウンロードボタンまたはリスト表示
-            for pair_name, file_a_name, file_b_name, output_filename, dxf_data, success, entity_counts in results:
+            for pair_name, file_new_name, file_old_name, output_filename, dxf_data, success, entity_counts in results:
                 if success and dxf_data:
                     if download_method == "個別にダウンロード":
                         col1, col2 = st.columns([3, 1])
 
                         with col1:
-                            st.write(f"**{pair_name}**: {file_a_name} ↔ {file_b_name}")
-                            # エンティティ数の表示（2026-09-18、A側/B側で分けて表示。
-                            # unchanged_offset_a_entities/total_a_entities はオフセット
+                            st.write(f"**{pair_name}**: {file_new_name} ↔ {file_old_name}")
+                            # エンティティ数の表示（2026-09-18、OLD側/NEW側で分けて表示。
+                            # unchanged_offset_old_entities/total_old_entities はオフセット
                             # 補正未使用・6レイヤー化前の旧セッション結果には存在しない
                             # 可能性があるため .get() で読む）
                             if entity_counts:
-                                unchanged_offset_b = entity_counts.get('unchanged_offset_entities', 0)
-                                unchanged_offset_a = entity_counts.get('unchanged_offset_a_entities', 0)
-                                offset_a_caption = f" / オフセット一致 {unchanged_offset_a}" if unchanged_offset_a > 0 else ""
-                                offset_b_caption = f" / オフセット一致 {unchanged_offset_b}" if unchanged_offset_b > 0 else ""
-                                total_a = entity_counts.get('total_a_entities')
-                                total_a_caption = f"（計 {total_a}）" if total_a is not None else ""
+                                unchanged_offset_new = entity_counts.get('unchanged_offset_entities', 0)
+                                unchanged_offset_old = entity_counts.get('unchanged_offset_old_entities', 0)
+                                offset_old_caption = f" / オフセット一致 {unchanged_offset_old}" if unchanged_offset_old > 0 else ""
+                                offset_new_caption = f" / オフセット一致 {unchanged_offset_new}" if unchanged_offset_new > 0 else ""
+                                total_old = entity_counts.get('total_old_entities')
+                                total_old_caption = f"（計 {total_old}）" if total_old is not None else ""
                                 st.caption(
-                                    f" A側: 削除 {entity_counts['deleted_entities']} / "
+                                    f" OLD側: 削除 {entity_counts['deleted_entities']} / "
                                     f"変更なし {entity_counts['unchanged_entities']}"
-                                    f"{offset_a_caption}{total_a_caption}"
+                                    f"{offset_old_caption}{total_old_caption}"
                                 )
                                 st.caption(
-                                    f" B側: 追加 {entity_counts['added_entities']} / "
+                                    f" NEW側: 追加 {entity_counts['added_entities']} / "
                                     f"変更なし {entity_counts['unchanged_entities']}"
-                                    f"{offset_b_caption}（計 {entity_counts['total_entities']}）"
+                                    f"{offset_new_caption}（計 {entity_counts['total_entities']}）"
                                 )
 
                         with col2:
@@ -355,9 +369,9 @@ def app():
                         entity_info = ""
                         if entity_counts:
                             entity_info = f" (差分: {entity_counts['diff_entities']}件)"
-                        st.write(f"✅ **{pair_name}**: {file_a_name} ↔ {file_b_name} → `{output_filename}`{entity_info}")
+                        st.write(f"✅ **{pair_name}**: {file_new_name} ↔ {file_old_name} → `{output_filename}`{entity_info}")
                 elif not success:
-                    st.error(f"❌ **{pair_name}**: {file_a_name} ↔ {file_b_name} - 処理に失敗しました")
+                    st.error(f"❌ **{pair_name}**: {file_new_name} ↔ {file_old_name} - 処理に失敗しました")
 
             # 新しい比較を開始するボタン
             if st.button("🔄 新しい比較を開始", key="restart_button"):
@@ -366,30 +380,30 @@ def app():
                     if key in ['processing_results', 'processing_settings']:
                         del st.session_state[key]
                 st.rerun()
-            
+
             # レイヤー構成の凡例を表示
             if settings:
-                offset_a_color = settings.get('unchanged_offset_a_color', 8)
-                offset_b_color = settings.get('unchanged_offset_b_color', 9)
+                offset_old_color = settings.get('unchanged_offset_old_color', 8)
+                offset_new_color = settings.get('unchanged_offset_new_color', 9)
                 st.info(f"""
-                生成されたDXFファイルは7レイヤー構成です。開いた直後は「A_ALL」「B_ALL」の
-                2枚だけが表示され、「A_ALL」で基準ファイル(A)の図面全体が、「B_ALL」で
-                比較対象ファイル(B)の図面全体が、それぞれ変更箇所の色分けつきで再現されます
+                生成されたDXFファイルは7レイヤー構成です。開いた直後は「NEW_ALL」「OLD_ALL」の
+                2枚だけが表示され、「NEW_ALL」で流用先ファイル(NEW)の図面全体が、「OLD_ALL」で
+                流用元ファイル(OLD)の図面全体が、それぞれ変更箇所の色分けつきで再現されます
                 （複数レイヤーを選択する手間を無くすための合成レイヤーです）。
                 以下のカテゴリ別レイヤーは既定では非表示で、詳細を確認したいときに
                 手動でONにできます：
-                - A_DELETED (色{settings.get('deleted_color', 6)}): 基準ファイル(A)にのみ存在する要素
-                - B_ADDED (色{settings.get('added_color', 4)}): 比較対象ファイル(B)にのみ存在する要素
+                - NEW_ADDED (色{settings.get('added_color', 4)}): 流用先ファイル(NEW)にのみ存在する要素
+                - OLD_DELETED (色{settings.get('deleted_color', 6)}): 流用元ファイル(OLD)にのみ存在する要素
                 - UNCHANGED (色{settings.get('unchanged_color', 7)}): 両方のファイルに
-                  存在し変更がない要素（A/Bで内容が同一のため1レイヤーに統合）
-                - A_UNCHANGED_OFFSET (色{offset_a_color}) / B_UNCHANGED_OFFSET (色{offset_b_color}):
+                  存在し変更がない要素（OLD/NEWで内容が同一のため1レイヤーに統合）
+                - OLD_UNCHANGED_OFFSET (色{offset_old_color}) / NEW_UNCHANGED_OFFSET (色{offset_new_color}):
                   自動検出されたオフセットで一致した要素（検出0件のペアでは生成されません。それぞれ
-                  基準ファイル(A)・比較対象ファイル(B)の座標で描画。検出内容は各ペアの
+                  流用元ファイル(OLD)・流用先ファイル(NEW)の座標で描画。検出内容は各ペアの
                   「🔍 検出されたオフセット」から確認できます）
-                - A_ALL / B_ALL: 上記のうちファイルA/Bの再現に必要なものを1枚に複製した合成レイヤー
+                - OLD_ALL / NEW_ALL: 上記のうちファイルOLD/NEWの再現に必要なものを1枚に複製した合成レイヤー
                 """)
     else:
-        st.warning("少なくとも1つのファイルペア（基準DXFファイル、比較対象DXFファイル）を登録してください。")
+        st.warning("少なくとも1つのファイルペア（流用先DXFファイル、流用元DXFファイル）を登録してください。")
 
 if __name__ == "__main__":
     app()

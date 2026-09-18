@@ -4,7 +4,7 @@ DXF Offset Analysis Tool - Standalone Version
 スタンドアロン版：すべての機能を1ファイルに統合
 
 使用方法:
-    python analyze_offset.py fileA.dxf fileB.dxf
+    python analyze_offset.py fileOLD.dxf fileNEW.dxf
 
 オプション:
     -t, --tolerance FLOAT   クラスタリングの許容誤差 (デフォルト: 0.1)
@@ -66,50 +66,50 @@ def extract_labels_with_positions(dxf_path):
     return labels_positions
 
 
-def calculate_offsets(labels_a, labels_b):
+def calculate_offsets(labels_old, labels_new):
     """
     Calculate position offsets for all matching labels between two files.
     Returns: list of (dx, dy, label) tuples
 
     Note: Offsets are calculated as (position_a - position_b) so they can be
-    directly applied to file B in DXF-visual-diff to align it with file A.
+    directly applied to file NEW in DXF-visual-diff to align it with file OLD.
     """
     offsets = []
 
     # Find common labels
-    common_labels = set(labels_a.keys()) & set(labels_b.keys())
+    common_labels = set(labels_old.keys()) & set(labels_new.keys())
 
     # For each common label, calculate offsets
     for label in common_labels:
-        positions_a = labels_a[label]
-        positions_b = labels_b[label]
+        positions_old = labels_old[label]
+        positions_new = labels_new[label]
 
         # If label appears same number of times in both files
-        if len(positions_a) == len(positions_b):
+        if len(positions_old) == len(positions_new):
             # Sort positions to match them up
-            positions_a_sorted = sorted(positions_a)
-            positions_b_sorted = sorted(positions_b)
+            positions_a_sorted = sorted(positions_old)
+            positions_b_sorted = sorted(positions_new)
 
-            for pos_a, pos_b in zip(positions_a_sorted, positions_b_sorted):
-                # Calculate offset as (A - B) so it can be directly applied to B
-                dx = pos_a[0] - pos_b[0]
-                dy = pos_a[1] - pos_b[1]
+            for pos_old, pos_new in zip(positions_a_sorted, positions_b_sorted):
+                # Calculate offset as (OLD - NEW) so it can be directly applied to NEW
+                dx = pos_old[0] - pos_new[0]
+                dy = pos_old[1] - pos_new[1]
                 offsets.append((dx, dy, label))
         else:
             # If different counts, match closest positions
-            for pos_a in positions_a:
+            for pos_old in positions_old:
                 min_dist = float('inf')
-                closest_pos_b = None
-                for pos_b in positions_b:
-                    dist = ((pos_b[0] - pos_a[0])**2 + (pos_b[1] - pos_a[1])**2)**0.5
+                closest_pos_new = None
+                for pos_new in positions_new:
+                    dist = ((pos_new[0] - pos_old[0])**2 + (pos_new[1] - pos_old[1])**2)**0.5
                     if dist < min_dist:
                         min_dist = dist
-                        closest_pos_b = pos_b
+                        closest_pos_new = pos_new
 
-                if closest_pos_b:
-                    # Calculate offset as (A - B) so it can be directly applied to B
-                    dx = pos_a[0] - closest_pos_b[0]
-                    dy = pos_a[1] - closest_pos_b[1]
+                if closest_pos_new:
+                    # Calculate offset as (OLD - NEW) so it can be directly applied to NEW
+                    dx = pos_old[0] - closest_pos_new[0]
+                    dy = pos_old[1] - closest_pos_new[1]
                     offsets.append((dx, dy, label))
 
     return offsets
@@ -138,14 +138,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 使用例:
-  python analyze_offset.py drawing_A.dxf drawing_B.dxf
-  python analyze_offset.py drawing_A.dxf drawing_B.dxf --tolerance 0.5
-  python analyze_offset.py drawing_A.dxf drawing_B.dxf --top-n 20
+  python analyze_offset.py drawing_OLD.dxf drawing_NEW.dxf
+  python analyze_offset.py drawing_OLD.dxf drawing_NEW.dxf --tolerance 0.5
+  python analyze_offset.py drawing_OLD.dxf drawing_NEW.dxf --top-n 20
         '''
     )
 
-    parser.add_argument('file_a', help='基準DXFファイル (File A)')
-    parser.add_argument('file_b', help='比較対象DXFファイル (File B)')
+    parser.add_argument('file_old', help='基準DXFファイル (File OLD、流用元)')
+    parser.add_argument('file_new', help='比較対象DXFファイル (File NEW、流用先)')
     parser.add_argument('-t', '--tolerance', type=float, default=0.1,
                         help='クラスタリングの許容誤差 (デフォルト: 0.1)')
     parser.add_argument('-n', '--top-n', type=int, default=10,
@@ -158,16 +158,16 @@ def main():
     print("=" * 80)
     print("DXF Label Position Offset Analysis")
     print("=" * 80)
-    print(f"File A: {args.file_a}")
-    print(f"File B: {args.file_b}")
+    print(f"File OLD: {args.file_old}")
+    print(f"File NEW: {args.file_new}")
     print(f"Tolerance: {args.tolerance}")
     print()
 
     # Extract labels with positions
     print("ラベルを抽出中...")
     try:
-        labels_a = extract_labels_with_positions(args.file_a)
-        labels_b = extract_labels_with_positions(args.file_b)
+        labels_old = extract_labels_with_positions(args.file_old)
+        labels_new = extract_labels_with_positions(args.file_new)
     except FileNotFoundError as e:
         print(f"エラー: ファイルが見つかりません - {e}")
         sys.exit(1)
@@ -175,15 +175,15 @@ def main():
         print(f"エラー: ファイル読み込み中にエラーが発生しました - {e}")
         sys.exit(1)
 
-    print(f"Total labels in file A: {len(labels_a)}")
-    print(f"Total labels in file B: {len(labels_b)}")
+    print(f"Total labels in file OLD: {len(labels_old)}")
+    print(f"Total labels in file NEW: {len(labels_new)}")
 
     # Calculate offsets
     print("オフセットを計算中...")
-    offsets = calculate_offsets(labels_a, labels_b)
+    offsets = calculate_offsets(labels_old, labels_new)
 
     # Count common labels
-    common_labels = set(labels_a.keys()) & set(labels_b.keys())
+    common_labels = set(labels_old.keys()) & set(labels_new.keys())
     print(f"Common labels: {len(common_labels)}")
 
     if not offsets:

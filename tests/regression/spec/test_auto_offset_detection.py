@@ -23,7 +23,7 @@
        記号1個分の小さな移動（一致件数が少ない）と、散在した偶然の一致を
        「広がり」で区別する。ユーザーが具体的なエンティティハンドル付きで
        報告した実例（EE3294-039-03B vs EE4153-039-03A）に基づく
-    5. offset_b（明示指定）は残る。offset_detection と併用可能（和集合）
+    5. offset_new（明示指定）は残る。offset_detection と併用可能（和集合）
 
 以前どう壊れていたか（この機能追加前）:
     ファイルの一部だけが平行移動していても、その移動量を手動で入力しない限り
@@ -65,10 +65,10 @@ def _line_starts(doc, layer_name):
     return out
 
 
-def _run_compare(path_a, path_b, tmpdir, offset_detection, suffix=""):
+def _run_compare(path_old, path_new, tmpdir, offset_detection, suffix=""):
     output_path = os.path.join(tmpdir, f'diff{suffix}.dxf')
     success, entity_counts = compare_dxf_files_and_generate_dxf(
-        path_a, path_b, output_path,
+        path_old, path_new, output_path,
         tolerance=TOLERANCE,
         offset_detection=offset_detection,
     )
@@ -86,15 +86,15 @@ def _default_config(**overrides):
 
 
 def _save_pair(build_a, build_b, tmpdir, name='pair'):
-    doc_a = ezdxf.new()
-    build_a(doc_a.modelspace())
-    doc_b = ezdxf.new()
-    build_b(doc_b.modelspace())
-    path_a = os.path.join(tmpdir, f'{name}_a.dxf')
-    path_b = os.path.join(tmpdir, f'{name}_b.dxf')
-    doc_a.saveas(path_a)
-    doc_b.saveas(path_b)
-    return path_a, path_b
+    doc_old = ezdxf.new()
+    build_a(doc_old.modelspace())
+    doc_new = ezdxf.new()
+    build_b(doc_new.modelspace())
+    path_old = os.path.join(tmpdir, f'{name}_a.dxf')
+    path_new = os.path.join(tmpdir, f'{name}_b.dxf')
+    doc_old.saveas(path_old)
+    doc_new.saveas(path_new)
+    return path_old, path_new
 
 
 def _distinct_circles(msp, count, base_x, base_y, dx=0.0, dy=0.0, radius_start=1.0, spacing=20.0):
@@ -130,9 +130,9 @@ def test_detects_single_block_move():
             # B + delta = A となるように B 側は A から delta を引いた位置に置く
             _distinct_circles(msp, 12, base_x=0, base_y=0, dx=-delta[0], dy=-delta[1])
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
         cfg = _default_config()
-        doc, counts = _run_compare(path_a, path_b, d, cfg)
+        doc, counts = _run_compare(path_old, path_new, d, cfg)
 
         assert counts['unchanged_offset_entities'] == 12
         assert counts['deleted_entities'] == 0
@@ -142,8 +142,8 @@ def test_detects_single_block_move():
         assert detected['offset'] == delta
         assert detected['matches'] == 12
         assert detected['shapes'] == 12
-        assert 'A_UNCHANGED_OFFSET' in doc.layers
-        assert 'B_UNCHANGED_OFFSET' in doc.layers
+        assert 'OLD_UNCHANGED_OFFSET' in doc.layers
+        assert 'NEW_UNCHANGED_OFFSET' in doc.layers
 
 
 def test_below_min_matches_is_not_adopted():
@@ -158,9 +158,9 @@ def test_below_min_matches_is_not_adopted():
         def build_b(msp):
             _distinct_circles(msp, 5, base_x=0, base_y=0, dx=-delta[0], dy=-delta[1])
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
         cfg = _default_config()  # min_matches=10 のまま
-        doc, counts = _run_compare(path_a, path_b, d, cfg)
+        doc, counts = _run_compare(path_old, path_new, d, cfg)
 
         assert counts['unchanged_offset_entities'] == 0
         assert counts['deleted_entities'] == 5
@@ -188,11 +188,11 @@ def test_regular_spacing_artifact_rejected():
                 x = i * pitch - shift  # B + (shift, 0) = A の対応する位置になる
                 msp.add_line(start=(x, 200.0, 0), end=(x + 2.0, 200.0, 0), dxfattribs={'layer': '0'})
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
         # min_matches を低くして「一致件数はクリアする」状況を作り、
         # min_distinct_shapes（既定5）だけで弾かれることを確認する
         cfg = _default_config(min_matches=5, max_instances_per_shape=15)
-        doc, counts = _run_compare(path_a, path_b, d, cfg)
+        doc, counts = _run_compare(path_old, path_new, d, cfg)
 
         assert counts['unchanged_offset_entities'] == 0, \
             "形状が1種類しかない等間隔配置が誤ってUNCHANGED_OFFSETとして採用されている"
@@ -216,9 +216,9 @@ def test_multiple_offsets_detected():
             _distinct_circles(msp, 12, base_x=0, base_y=0, dx=-delta1[0], dy=-delta1[1], radius_start=1.0)
             _distinct_circles(msp, 12, base_x=0, base_y=500.0, dx=-delta2[0], dy=-delta2[1], radius_start=101.0)
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
         cfg = _default_config()
-        doc, counts = _run_compare(path_a, path_b, d, cfg)
+        doc, counts = _run_compare(path_old, path_new, d, cfg)
 
         assert len(counts['detected_offsets']) == 2
         assert counts['unchanged_offset_entities'] == 24
@@ -257,9 +257,9 @@ def test_entity_matched_by_two_offsets_counted_once():
                 q_x = base_x - delta1[0]
                 msp.add_circle(center=(q_x, 0.0), radius=radius, dxfattribs={'layer': '0'})
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
         cfg = _default_config()
-        doc, counts = _run_compare(path_a, path_b, d, cfg)
+        doc, counts = _run_compare(path_old, path_new, d, cfg)
 
         # Bの10個すべてが、どちらか一方のオフセットで一度だけ一致する
         assert counts['unchanged_offset_entities'] == 10
@@ -286,9 +286,9 @@ def test_max_offsets_cap():
             _distinct_circles(msp, 12, base_x=0, base_y=0, dx=-delta1[0], dy=-delta1[1], radius_start=1.0)
             _distinct_circles(msp, 12, base_x=0, base_y=500.0, dx=-delta2[0], dy=-delta2[1], radius_start=101.0)
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
         cfg = _default_config(max_offsets=1)
-        doc, counts = _run_compare(path_a, path_b, d, cfg)
+        doc, counts = _run_compare(path_old, path_new, d, cfg)
 
         assert len(counts['detected_offsets']) == 1
         assert counts['unchanged_offset_entities'] == 12
@@ -307,9 +307,9 @@ def test_exact_match_unaffected_by_detection():
         def build_b(msp):
             msp.add_line(start=(0, 0, 0), end=(10, 0, 0), dxfattribs={'layer': '0'})
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
         cfg = _default_config()
-        doc, counts = _run_compare(path_a, path_b, d, cfg)
+        doc, counts = _run_compare(path_old, path_new, d, cfg)
 
         assert counts['unchanged_entities'] == 1
         assert counts['unchanged_offset_entities'] == 0
@@ -327,12 +327,12 @@ def test_added_deleted_use_raw_coordinates():
         def build_b(msp):
             msp.add_line(start=(300.0, 300.0, 0), end=(310.0, 300.0, 0), dxfattribs={'layer': '0'})
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
         cfg = _default_config()
-        doc, counts = _run_compare(path_a, path_b, d, cfg)
+        doc, counts = _run_compare(path_old, path_new, d, cfg)
 
-        assert (200.0, 200.0) in _line_starts(doc, 'A_DELETED')
-        assert (300.0, 300.0) in _line_starts(doc, 'B_ADDED')
+        assert (200.0, 200.0) in _line_starts(doc, 'OLD_DELETED')
+        assert (300.0, 300.0) in _line_starts(doc, 'NEW_ADDED')
 
 
 def test_detection_disabled_matches_baseline():
@@ -347,16 +347,16 @@ def test_detection_disabled_matches_baseline():
         def build_b(msp):
             _distinct_circles(msp, 12, base_x=0, base_y=0, dx=-delta[0], dy=-delta[1])
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
-        doc, counts = _run_compare(path_a, path_b, d, offset_detection=None)
+        path_old, path_new = _save_pair(build_a, build_b, d)
+        doc, counts = _run_compare(path_old, path_new, d, offset_detection=None)
 
         assert counts['unchanged_offset_entities'] == 0
         assert counts['deleted_entities'] == 12
         assert counts['added_entities'] == 12
         assert counts['detected_offsets'] == []
         assert counts['rejected_offset_candidates'] == 0
-        assert 'A_UNCHANGED_OFFSET' not in doc.layers
-        assert 'B_UNCHANGED_OFFSET' not in doc.layers
+        assert 'OLD_UNCHANGED_OFFSET' not in doc.layers
+        assert 'NEW_UNCHANGED_OFFSET' not in doc.layers
 
 
 def test_compact_small_group_is_rescued():
@@ -372,9 +372,9 @@ def test_compact_small_group_is_rescued():
         def build_b(msp):
             _distinct_circles(msp, 5, base_x=0, base_y=0, dx=-delta[0], dy=-delta[1], spacing=2.0)
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
         cfg = _default_config()  # min_matches=10（①では不成立）、compact既定4/2/15.0
-        doc, counts = _run_compare(path_a, path_b, d, cfg)
+        doc, counts = _run_compare(path_old, path_new, d, cfg)
 
         assert counts['unchanged_offset_entities'] == 5
         assert counts['deleted_entities'] == 0
@@ -400,9 +400,9 @@ def test_scattered_small_group_is_not_rescued():
         def build_b(msp):
             _distinct_circles(msp, 5, base_x=0, base_y=0, dx=-delta[0], dy=-delta[1])
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
         cfg = _default_config()
-        doc, counts = _run_compare(path_a, path_b, d, cfg)
+        doc, counts = _run_compare(path_old, path_new, d, cfg)
 
         assert counts['unchanged_offset_entities'] == 0
         assert counts['deleted_entities'] == 5
@@ -424,9 +424,9 @@ def test_compact_rescue_requires_shape_diversity():
         def build_b(msp):
             _same_shape_circles(msp, 5, base_x=0, base_y=0, dx=-delta[0], dy=-delta[1], spacing=2.0)
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
         cfg = _default_config()
-        doc, counts = _run_compare(path_a, path_b, d, cfg)
+        doc, counts = _run_compare(path_old, path_new, d, cfg)
 
         assert counts['unchanged_offset_entities'] == 0, \
             "形状1種類のみのコンパクトな移動が誤って救済されている"
@@ -447,9 +447,9 @@ def test_compact_rescue_respects_min_matches():
         def build_b(msp):
             _distinct_circles(msp, 3, base_x=0, base_y=0, dx=-delta[0], dy=-delta[1], spacing=2.0)
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
         cfg = _default_config()
-        doc, counts = _run_compare(path_a, path_b, d, cfg)
+        doc, counts = _run_compare(path_old, path_new, d, cfg)
 
         assert counts['unchanged_offset_entities'] == 0
         assert counts['deleted_entities'] == 3
@@ -475,9 +475,9 @@ def test_detected_offsets_include_span_and_compact_flag():
             _distinct_circles(msp, 5, base_x=0, base_y=500.0,
                                dx=-delta_compact[0], dy=-delta_compact[1], radius_start=101.0, spacing=2.0)
 
-        path_a, path_b = _save_pair(build_a, build_b, d)
+        path_old, path_new = _save_pair(build_a, build_b, d)
         cfg = _default_config()
-        doc, counts = _run_compare(path_a, path_b, d, cfg)
+        doc, counts = _run_compare(path_old, path_new, d, cfg)
 
         assert len(counts['detected_offsets']) == 2
         by_offset = {d['offset']: d for d in counts['detected_offsets']}
