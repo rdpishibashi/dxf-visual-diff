@@ -16,6 +16,7 @@
 
 import html
 import io
+from pathlib import Path
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -24,6 +25,7 @@ import ezdxf
 from ezdxf import colors as ezdxf_colors
 from ezdxf import recover
 from ezdxf.addons.drawing import Frontend, RenderContext, config as drawing_config, layout, svg
+from ezdxf.fonts import font_manager as ezdxf_font_manager
 from ezdxf.fonts import fonts as ezdxf_fonts
 from ezdxf.math import BoundingBox2d
 
@@ -49,9 +51,15 @@ PRESETS: List[Tuple[str, Optional[List[str]]]] = [
     ("すべて", None),
 ]
 
+# リポジトリ同梱フォント（IPAex ゴシック。IPA フォントライセンス v1.0、無改変で再配布）。
+# Streamlit Cloud にはシステムフォントが1つも無く、apt（packages.txt）でも入らなかったため、
+# 同梱して ezdxf のフォント管理に直接登録する
+BUNDLED_FONT_DIR = Path(__file__).resolve().parent.parent / "fonts"
+BUNDLED_FONT_NAME = "ipaexg.ttf"
+
 # 日本語を描画できるフォントの探索順（先に見つかったものを使う）
 CJK_FONT_CANDIDATES = [
-    "ipaexg.ttf",       # IPAex ゴシック（Streamlit Cloud: packages.txt の fonts-ipaexfont-gothic）
+    BUNDLED_FONT_NAME,  # 同梱の IPAex ゴシック（どの環境でも同じ見た目になるよう最優先）
     "ipag.ttf",         # IPA ゴシック
     "Arial Unicode.ttf",  # macOS
     "ArialUni.ttf",     # Windows
@@ -60,8 +68,6 @@ CJK_FONT_CANDIDATES = [
     "NotoSansCJK-Regular.ttc",
     "NotoSansCJKjp-Regular.otf",
 ]
-
-_font_cache_rebuilt = False
 
 
 @dataclass
@@ -81,26 +87,34 @@ class PreviewResult:
     empty: bool = False
 
 
+def _register_bundled_font() -> None:
+    """同梱フォントを ezdxf のフォント管理に登録する（未登録のときだけ）。
+
+    フォントが1つも無い環境（Streamlit Cloud）では、文字の描画時に ezdxf が
+    FontNotFoundError（"no fonts available, not even fallback fonts"）を出す。
+    ezdxf は「見つからなかったフォントの代替」を最初に引いた時点で固定して
+    キャッシュするため、登録後はその固定値も消して同梱フォントを代替にする。
+    """
+    manager = ezdxf_fonts.font_manager
+    if not (BUNDLED_FONT_DIR / BUNDLED_FONT_NAME).is_file():
+        return
+    if not manager.has_font(BUNDLED_FONT_NAME):
+        manager.build([str(BUNDLED_FONT_DIR)], support_dirs=False)
+    if BUNDLED_FONT_NAME not in ezdxf_font_manager.DEFAULT_FONTS:
+        ezdxf_font_manager.DEFAULT_FONTS.append(BUNDLED_FONT_NAME)
+    manager._fallback_font_name = ""
+
+
 def find_cjk_font() -> Optional[str]:
     """日本語を描画できるフォントのファイル名を返す。見つからなければ None。
 
-    フォント一覧キャッシュに載っていない場合に備え、一度だけ再構築を試みる
-    （apt で入れた直後のフォントを拾うため）。
+    同梱フォントを先に登録してから `CJK_FONT_CANDIDATES` の順に探す。
     """
-    global _font_cache_rebuilt
+    _register_bundled_font()
     manager = ezdxf_fonts.font_manager
     for name in CJK_FONT_CANDIDATES:
         if manager.has_font(name):
             return name
-    if not _font_cache_rebuilt:
-        _font_cache_rebuilt = True
-        try:
-            manager.build()
-        except Exception:
-            return None
-        for name in CJK_FONT_CANDIDATES:
-            if manager.has_font(name):
-                return name
     return None
 
 
