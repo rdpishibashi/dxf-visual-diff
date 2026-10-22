@@ -6,6 +6,8 @@ from pathlib import Path
 import zipfile
 from io import BytesIO
 
+import streamlit.components.v1 as components
+
 # utils モジュールをインポート可能にするためのパスの追加
 current_dir = os.path.dirname(os.path.abspath(__file__))
 utils_path = os.path.join(current_dir, 'utils')
@@ -14,6 +16,7 @@ sys.path.insert(0, utils_path)
 from utils.compare_dxf import compare_dxf_files_and_generate_dxf
 from utils.common_utils import save_uploadedfile, handle_error
 from utils.offset_detector import OffsetDetectionConfig
+from utils.dxf_preview import render_layers_svg, build_viewer_html
 
 from config import diff_config
 
@@ -37,6 +40,14 @@ def generate_output_filename(file_new_name, file_old_name):
     file_old_base = Path(file_old_name).stem
 
     return f"{file_new_base}_vs_{file_old_base}.dxf"
+
+@st.cache_data(show_spinner=False)
+def render_preview_html(dxf_data: bytes):
+    """差分DXFのバイト列からブラウザ内プレビュー用HTMLを生成する（DXFバイト列をキーにキャッシュ）。"""
+    result = render_layers_svg(dxf_data)
+    return build_viewer_html(result, height_px=PREVIEW_HEIGHT_PX), result.cjk_font is not None, result.empty
+
+PREVIEW_HEIGHT_PX = 720
 
 def create_zip_archive(results):
     """
@@ -83,7 +94,11 @@ def app():
             "検出されたオフセットは結果画面に一覧表示されます）",
             "- OLD_ALL / NEW_ALL: 上記カテゴリ別レイヤーのうち、それぞれファイルOLD/NEWの再現に"
             "必要なもの（OLD_ALL = OLD_DELETED + UNCHANGED + OLD_UNCHANGED_OFFSET、"
-            "NEW_ALL = NEW_ADDED + UNCHANGED + NEW_UNCHANGED_OFFSET）を1枚に複製した合成レイヤー"
+            "NEW_ALL = NEW_ADDED + UNCHANGED + NEW_UNCHANGED_OFFSET）を1枚に複製した合成レイヤー",
+            "",
+            "**ブラウザでのプレビュー：** 比較結果の各ペアにある「👁 ブラウザでプレビュー」をONにすると、"
+            "差分DXFをこの画面で確認できます（ホイールで拡大縮小、ドラッグで移動、"
+            "レイヤーごとの表示切り替えに対応）。確認用の簡易表示で、正式な確認にはダウンロードしたDXFをCADで開いてください。"
         ]
 
         st.info("\n".join(help_text))
@@ -307,7 +322,7 @@ def app():
                 st.write("---")
 
             # 個別ダウンロードボタンまたはリスト表示
-            for pair_name, file_new_name, file_old_name, output_filename, dxf_data, success, entity_counts in results:
+            for result_index, (pair_name, file_new_name, file_old_name, output_filename, dxf_data, success, entity_counts) in enumerate(results):
                 if success and dxf_data:
                     if download_method == "個別にダウンロード":
                         col1, col2 = st.columns([3, 1])
@@ -370,6 +385,17 @@ def app():
                         if entity_counts:
                             entity_info = f" (差分: {entity_counts['diff_entities']}件)"
                         st.write(f"✅ **{pair_name}**: {file_new_name} ↔ {file_old_name} → `{output_filename}`{entity_info}")
+
+                    # ブラウザ内プレビュー（ダウンロード方法によらず表示。ONのときだけ描画する）。
+                    # key はペア名ではなく結果の番号で作る（ペア名が重複してもキーが衝突しない）
+                    if st.toggle("👁 ブラウザでプレビュー", key=f"preview_{result_index}"):
+                        try:
+                            preview_html, has_cjk_font, is_empty = render_preview_html(dxf_data)
+                            if not has_cjk_font and not is_empty:
+                                st.caption("⚠️ 日本語フォントが見つからないため、日本語の文字はプレビューに表示されません（ダウンロードしたDXFには影響しません）。")
+                            components.html(preview_html, height=PREVIEW_HEIGHT_PX)
+                        except Exception as e:
+                            st.warning(f"プレビューを表示できませんでした: {e}")
                 elif not success:
                     st.error(f"❌ **{pair_name}**: {file_new_name} ↔ {file_old_name} - 処理に失敗しました")
 
