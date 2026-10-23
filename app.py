@@ -96,7 +96,7 @@ def app():
             "必要なもの（OLD_ALL = OLD_DELETED + UNCHANGED + OLD_UNCHANGED_OFFSET、"
             "NEW_ALL = NEW_ADDED + UNCHANGED + NEW_UNCHANGED_OFFSET）を1枚に複製した合成レイヤー",
             "",
-            "**ブラウザでのプレビュー：** 比較結果の各ペアにある「👁 ブラウザでプレビュー」をONにすると、"
+            "**ブラウザでのプレビュー：** 比較結果の各ペアにある「ブラウザでプレビュー」をONにすると、"
             "差分DXFをこの画面で確認できます（ホイールで拡大縮小、ドラッグで移動、"
             "レイヤーごとの表示切り替えに対応）。確認用の簡易表示で、正式な確認にはダウンロードしたDXFをCADで開いてください。"
         ]
@@ -365,7 +365,7 @@ def app():
                         detected_offsets = entity_counts.get('detected_offsets', []) if entity_counts else []
                         if detected_offsets:
                             rejected_count = entity_counts.get('rejected_offset_candidates', 0)
-                            with st.expander(f"🔍 検出されたオフセット（{len(detected_offsets)}個）", expanded=False):
+                            with st.expander(f"検出されたオフセット（{len(detected_offsets)}個）", expanded=False):
                                 for d in detected_offsets:
                                     dx, dy = d['offset']
                                     # span/compact は自動検出未使用の旧セッション結果には
@@ -388,7 +388,7 @@ def app():
 
                     # ブラウザ内プレビュー（ダウンロード方法によらず表示。ONのときだけ描画する）。
                     # key はペア名ではなく結果の番号で作る（ペア名が重複してもキーが衝突しない）
-                    if st.toggle("👁 ブラウザでプレビュー", key=f"preview_{result_index}"):
+                    if st.toggle("ブラウザでプレビュー", key=f"preview_{result_index}"):
                         try:
                             preview_html, has_cjk_font, is_empty = render_preview_html(dxf_data)
                             if not has_cjk_font and not is_empty:
@@ -425,7 +425,7 @@ def app():
                 - OLD_UNCHANGED_OFFSET (色{offset_old_color}) / NEW_UNCHANGED_OFFSET (色{offset_new_color}):
                   自動検出されたオフセットで一致した要素（検出0件のペアでは生成されません。それぞれ
                   流用元ファイル(OLD)・流用先ファイル(NEW)の座標で描画。検出内容は各ペアの
-                  「🔍 検出されたオフセット」から確認できます）
+                  「検出されたオフセット」から確認できます）
                 - OLD_ALL / NEW_ALL: 上記のうちファイルOLD/NEWの再現に必要なものを1枚に複製した合成レイヤー
                 """)
     else:
