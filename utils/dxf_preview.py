@@ -12,6 +12,9 @@
 - 差分DXFは5カテゴリ層が既定で OFF のため、レイヤー表示は RenderContext の
   レイヤープロパティ上書きで制御する
 - 外部 JS・CDN には依存しない（社内ネットワークで遮断される可能性があるため）
+- 他図面の表示（`render_drawing_svg()`）は、アップロードされた DXF を元の色のまま1枚の SVG にする
+  （レイヤー上書きなし＝DXF 上で非表示の画層は描かない）。左パネルを操作だけにした viewer は
+  `build_viewer_html(layer_panel=False)`
 """
 
 import html
@@ -238,6 +241,43 @@ def render_layers_svg(dxf_bytes: bytes) -> PreviewResult:
     return result
 
 
+def render_drawing_svg(dxf_bytes: bytes) -> PreviewResult:
+    """任意の DXF を、元の色のまま1枚の SVG にする（「他図面の表示」用）。
+
+    差分DXFと違いレイヤーの上書きはしないので、DXF 上で非表示（off/frozen）の画層は描かれない。
+    結果は `layers` に1件（name="DRAWING"）だけ持つ。元の dxf_bytes は変更しない。
+    """
+    doc = _read_doc(dxf_bytes)
+    cjk_font = find_cjk_font()
+    if cjk_font:
+        _apply_cjk_font(doc, cjk_font)
+
+    msp = doc.modelspace()
+    count = len(msp)
+    result = PreviewResult(cjk_font=cjk_font)
+    layer = LayerSvg("DRAWING", "図面", "#ffffff", count, "")
+    result.layers.append(layer)
+
+    backend = svg.SVGBackend()
+    cfg = drawing_config.Configuration(background_policy=drawing_config.BackgroundPolicy.BLACK)
+    Frontend(RenderContext(doc), backend, config=cfg).draw_layout(msp)
+    bbox = backend.player().bbox()
+    if not count or not bbox.has_data:
+        result.empty = True
+        return result
+
+    root = backend.get_xml_root_element(layout.Page(0, 0, layout.Units.mm), render_box=bbox)
+    vb = [int(float(v)) for v in root.get("viewBox", "0 0 0 0").split()]
+    result.view_box = (vb[2], vb[3])
+    styles, groups = _prefix_classes(root, "D0")
+    parts = [ET.tostring(st, encoding="unicode") for st in styles]
+    parts.append('<g class="layer" data-layer="DRAWING">')
+    parts.extend(ET.tostring(g, encoding="unicode") for g in groups)
+    parts.append("</g>")
+    layer.inner_svg = "".join(parts)
+    return result
+
+
 _VIEWER_CSS = """
 html,body{margin:0;height:100%;background:#000;color:#ddd;
   font-family:-apple-system,"Hiragino Sans","Yu Gothic UI","Meiryo",sans-serif;font-size:13px}
@@ -257,6 +297,7 @@ button:hover{background:#3a3a3a}
 #cv.drag{cursor:grabbing}
 #cv .layer path{vector-effect:non-scaling-stroke;stroke-width:1px}
 #note{position:absolute;right:8px;bottom:6px;color:#777;font-size:11px;pointer-events:none}
+#wrap:fullscreen{height:100vh !important}
 """
 
 _VIEWER_JS = """
@@ -289,6 +330,16 @@ _VIEWER_JS = """
   svg.addEventListener('dblclick',reset);
   document.getElementById('fit').addEventListener('click',reset);
 
+  var wrap=document.getElementById('wrap'),fsBtn=document.getElementById('fs'),fsNote=document.getElementById('fsnote');
+  function fsLabel(){fsBtn.textContent=document.fullscreenElement?'全画面を終了':'全画面';}
+  fsBtn.addEventListener('click',function(){
+    fsNote.textContent='';
+    if(document.fullscreenElement){document.exitFullscreen();return;}
+    var p=wrap.requestFullscreen?wrap.requestFullscreen():null;
+    if(!p){fsNote.textContent='この環境では全画面にできません';return;}
+    p.catch(function(){fsNote.textContent='この環境では全画面にできません';});});
+  document.addEventListener('fullscreenchange',fsLabel);
+
   var boxes=Array.prototype.slice.call(document.querySelectorAll('input[data-layer]'));
   function show(name,on){
     var g=svg.querySelector('g.layer[data-layer="'+name+'"]');
@@ -307,8 +358,11 @@ _VIEWER_JS = """
 """
 
 
-def build_viewer_html(result: PreviewResult, height_px: int = 720) -> str:
-    """自己完結した HTML（inline SVG + CSS + 素の JS）を生成する。外部参照は含まない。"""
+def build_viewer_html(result: PreviewResult, height_px: int = 720, layer_panel: bool = True) -> str:
+    """自己完結した HTML（inline SVG + CSS + 素の JS）を生成する。外部参照は含まない。
+
+    layer_panel=False のとき、左パネルは操作（全体表示・全画面）と操作方法だけにする（他図面用）。
+    """
     if result.empty:
         return (
             f'<div style="height:{height_px}px;display:flex;align-items:center;'
@@ -333,15 +387,22 @@ def build_viewer_html(result: PreviewResult, height_px: int = 720) -> str:
         value = "*" if names is None else ",".join(names)
         preset_buttons.append(f'<button data-preset="{html.escape(value)}">{html.escape(label)}</button>')
 
+    if layer_panel:
+        panel_top = (f'<h4>表示プリセット</h4>{"".join(preset_buttons)}'
+                     f'<h4>レイヤー</h4>{"".join(layer_rows)}')
+        side_style = ""
+    else:
+        panel_top = ""
+        side_style = ' style="width:160px"'
+
     body = "".join(layer.inner_svg for layer in result.layers)
     font_note = "" if result.cjk_font else "日本語フォントが見つからないため、日本語の文字は表示されません。"
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><style>{_VIEWER_CSS}</style></head>
 <body><div id="wrap" style="height:{height_px}px">
-<div id="side">
-<h4>表示プリセット</h4>{"".join(preset_buttons)}
-<h4>レイヤー</h4>{"".join(layer_rows)}
-<h4>操作</h4><button id="fit">全体表示</button>
+<div id="side"{side_style}>
+{panel_top}
+<h4>操作</h4><button id="fit">全体表示</button><button id="fs">全画面</button><div id="fsnote" style="color:#e8a"></div>
 <div style="color:#888;margin-top:6px;line-height:1.5">ホイール: 拡大縮小<br>ドラッグ: 移動<br>ダブルクリック: 全体表示</div>
 <div style="color:#e8a;margin-top:8px">{html.escape(font_note)}</div>
 </div>
