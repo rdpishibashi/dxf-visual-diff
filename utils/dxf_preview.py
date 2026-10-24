@@ -15,6 +15,7 @@
 - 他図面の表示（`render_drawing_svg()`）は、アップロードされた DXF を元の色のまま1枚の SVG にする
   （レイヤー上書きなし＝DXF 上で非表示の画層は描かない）。左パネルを操作だけにした viewer は
   `build_viewer_html(layer_panel=False)`
+- `config.diff_config` が無いプロジェクトでは `render_drawing_svg()` と `layer_panel=False` の viewer だけを使える
 """
 
 import html
@@ -32,13 +33,18 @@ from ezdxf.fonts import font_manager as ezdxf_font_manager
 from ezdxf.fonts import fonts as ezdxf_fonts
 from ezdxf.math import BoundingBox2d
 
-from config import diff_config
+try:
+    from config import diff_config
+except ImportError:
+    # config.py に diff_config が無いプロジェクト（HostPL-comparer。config.py は DXF-extract-labels と共有）は
+    # 差分DXFを描かない（render_drawing_svg() と build_viewer_html(layer_panel=False) だけを使う）
+    diff_config = None
 
 SVG_NS = "http://www.w3.org/2000/svg"
 ET.register_namespace("", SVG_NS)
 
 # プレビュー対象のカテゴリ別レイヤー: (レイヤー名, 表示名, 既定色(ACI))
-PREVIEW_LAYERS: List[Tuple[str, str, int]] = [
+PREVIEW_LAYERS: List[Tuple[str, str, int]] = [] if diff_config is None else [
     ("NEW_ADDED", "追加（NEWのみ）", diff_config.DEFAULT_ADDED_COLOR),
     ("OLD_DELETED", "削除（OLDのみ）", diff_config.DEFAULT_DELETED_COLOR),
     ("UNCHANGED", "変更なし", diff_config.DEFAULT_UNCHANGED_COLOR),
@@ -182,6 +188,8 @@ def render_layers_svg(dxf_bytes: bytes) -> PreviewResult:
 
     元の dxf_bytes は変更しない（フォント差し替えは読み込んだ doc に対してのみ行う）。
     """
+    if not PREVIEW_LAYERS:
+        raise RuntimeError("差分DXFのレイヤー色（config.diff_config）がありません")
     doc = _read_doc(dxf_bytes)
     cjk_font = find_cjk_font()
     if cjk_font:
